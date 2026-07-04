@@ -1,11 +1,11 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tracing::info;
-use twilight_http::Client as HttpClient;
-use twilight_model::id::{Id, marker::ChannelMarker};
 use wasmtime::component::Component;
 use wasmtime::Engine;
 use wasmtime::Store;
@@ -14,20 +14,18 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView, WasiCtxView};
 
 use super::plugin;
 
-pub type SharedHttp = Arc<HttpClient>;
-
 pub struct HostContext {
     wasi: WasiCtx,
     table: ResourceTable,
-    http: SharedHttp,
+    gateway_ping_ms: Arc<AtomicU64>,
 }
 
 impl HostContext {
-    pub fn new(http: SharedHttp) -> Self {
+    pub fn new(gateway_ping_ms: Arc<AtomicU64>) -> Self {
         Self {
             wasi: WasiCtxBuilder::new().build(),
             table: ResourceTable::default(),
-            http,
+            gateway_ping_ms,
         }
     }
 }
@@ -46,35 +44,12 @@ impl WasiView for HostContext {
 }
 
 impl plugin::ynsrvcs::plugins::host::Host for HostContext {
-    fn send_message(&mut self, channel_id: u64, content: String) -> Result<(), String> {
-        let http = Arc::clone(&self.http);
-        tokio::spawn(async move {
-            if let Err(e) = http
-                .create_message(Id::<ChannelMarker>::new(channel_id))
-                .content(&content)
-                .await
-            {
-                tracing::error!(?e, "plugin send_message failed");
-            }
-        });
-        Ok(())
-    }
-
-    fn send_interaction_response(
-        &mut self,
-        _interaction_id: u64,
-        _token: String,
-        _content: String,
-    ) -> Result<(), String> {
-        Err("interaction responses not yet implemented".into())
-    }
-
     fn http_request(
         &mut self,
-        url: String,
         method: String,
+        url: String,
         body: Vec<u8>,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<plugin::ynsrvcs::plugins::host::Response, String> {
         tokio::task::block_in_place(|| {
             let agent = ureq::agent();
             let http_req = http::Request::builder()
@@ -83,8 +58,28 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
                 .body(body)
                 .map_err(|e| e.to_string())?;
             let resp = agent.run(http_req).map_err(|e| e.to_string())?;
-            resp.into_body().read_to_vec().map_err(|e| e.to_string())
+            let status: u16 = resp.status().into();
+            let body = resp.into_body().read_to_vec().map_err(|e| e.to_string())?;
+            Ok(plugin::ynsrvcs::plugins::host::Response {
+                status,
+                body,
+            })
         })
+    }
+
+    fn get_env(&mut self, name: String) -> Option<String> {
+        std::env::var(&name).ok().filter(|v| !v.is_empty())
+    }
+
+    fn gateway_ping(&mut self) -> u64 {
+        self.gateway_ping_ms.load(Ordering::Relaxed)
+    }
+
+    fn now_ms(&mut self) -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
     }
 
     fn log(&mut self, level: String, message: String) {
@@ -102,14 +97,13 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
 pub(crate) struct LoadedPlugin {
     world: plugin::PluginWorld,
     store: Store<HostContext>,
-    commands: Vec<plugin::exports::ynsrvcs::plugins::plugin::Command>,
 }
 
 #[derive(Clone)]
 pub struct PluginManager {
     plugins: Arc<Mutex<HashMap<String, LoadedPlugin>>>,
     engine: Arc<Engine>,
-    http: SharedHttp,
+    gateway_ping_ms: Arc<AtomicU64>,
 }
 
 pub fn plugin_dir() -> String {
@@ -117,12 +111,16 @@ pub fn plugin_dir() -> String {
 }
 
 impl PluginManager {
-    pub fn new(engine: &Engine, http: SharedHttp) -> Result<Self> {
+    pub fn new(engine: &Engine) -> Result<Self> {
         Ok(Self {
             plugins: Arc::new(Mutex::new(HashMap::new())),
             engine: Arc::new(engine.clone()),
-            http,
+            gateway_ping_ms: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    pub fn set_gateway_ping_ms(&self, ms: u64) {
+        self.gateway_ping_ms.store(ms, Ordering::Relaxed);
     }
 
     pub async fn load_all(&self) -> Result<()> {
@@ -144,7 +142,13 @@ impl PluginManager {
 
         let mut loaded_plugins = Vec::new();
         for wasm_path in &entries {
-            match Self::load_one(&self.engine, &self.http, wasm_path).await {
+            match Self::load_one(
+                &self.engine,
+                Arc::clone(&self.gateway_ping_ms),
+                wasm_path,
+            )
+            .await
+            {
                 Ok((name, loaded)) => {
                     loaded_plugins.push((name, loaded));
                 }
@@ -172,7 +176,7 @@ impl PluginManager {
 
     pub(crate) async fn load_one(
         engine: &Engine,
-        http: &SharedHttp,
+        gateway_ping_ms: Arc<AtomicU64>,
         wasm_path: &Path,
     ) -> Result<(String, LoadedPlugin)> {
         let bytes = tokio::fs::read(wasm_path).await?;
@@ -188,26 +192,25 @@ impl PluginManager {
             |s: &mut HostContext| s,
         )?;
 
-        let mut store = Store::new(engine, HostContext::new(Arc::clone(http)));
+        let mut store = Store::new(engine, HostContext::new(gateway_ping_ms));
         let world = plugin::PluginWorld::instantiate_async(&mut store, &component, &linker).await?;
-
-        let commands = world.ynsrvcs_plugins_plugin().call_init(&mut store)?;
-        if !commands.is_empty() {
-            info!("Plugin {name} provides commands: {commands:?}");
-        }
 
         Ok((
             name,
             LoadedPlugin {
                 world,
                 store,
-                commands,
             },
         ))
     }
 
     pub async fn load(&self, wasm_path: &Path) -> Result<String> {
-        let (name, loaded) = Self::load_one(&self.engine, &self.http, wasm_path).await?;
+        let (name, loaded) = Self::load_one(
+            &self.engine,
+            Arc::clone(&self.gateway_ping_ms),
+            wasm_path,
+        )
+        .await?;
         self.plugins.lock().await.insert(name.clone(), loaded);
         Ok(name)
     }
@@ -228,15 +231,6 @@ impl PluginManager {
 
     pub async fn loaded_names(&self) -> Vec<String> {
         self.plugins.lock().await.keys().cloned().collect()
-    }
-
-    pub async fn list_commands(&self) -> Vec<plugin::exports::ynsrvcs::plugins::plugin::Command> {
-        self.plugins
-            .lock()
-            .await
-            .values()
-            .flat_map(|p| p.commands.clone())
-            .collect()
     }
 
     pub async fn dispatch_event(
@@ -330,23 +324,16 @@ mod tests {
 
         let wasm_path = ensure_ping_wasm()?;
         let engine = crate::wasm::plugin::create_engine()?;
-        let http = Arc::new(HttpClient::new("fake-token".to_string()));
         let (name, mut loaded) = PluginManager::load_one(
             &engine,
-            &http,
+            Arc::new(AtomicU64::new(0)),
             &wasm_path,
         )
         .await?;
 
         assert_eq!(name, "ping");
 
-        let guest = loaded.world.ynsrvcs_plugins_plugin();
-        let cmds = guest.call_init(&mut loaded.store)?;
-        tracing::info!("Plugin commands: {cmds:?}");
-        assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0].name, "ping");
-
-        guest.call_handle_event(
+        loaded.world.ynsrvcs_plugins_plugin().call_handle_event(
             &mut loaded.store,
             plugin::exports::ynsrvcs::plugins::plugin::EventType::MessageCreate,
             b"hello",

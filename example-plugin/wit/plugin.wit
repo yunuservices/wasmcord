@@ -1,9 +1,15 @@
 package ynsrvcs:plugins@0.1.0;
 
 interface host {
-    send-message: func(channel-id: u64, content: string) -> result<_, string>;
-    send-interaction-response: func(interaction-id: u64, token: string, content: string) -> result<_, string>;
-    http-request: func(url: string, method: string, body: list<u8>) -> result<list<u8>, string>;
+    record response {
+        status: u16,
+        body: list<u8>,
+    }
+
+    http-request: func(method: string, url: string, body: list<u8>) -> result<response, string>;
+    get-env: func(name: string) -> option<string>;
+    gateway-ping: func() -> u64;
+    now-ms: func() -> u64;
     log: func(level: string, message: string);
 }
 
@@ -18,12 +24,6 @@ interface plugin {
         voice-state-update,
     }
 
-    record command {
-        name: string,
-        description: string,
-    }
-
-    init: func() -> list<command>;
     handle-event: func(event-type: event-type, payload: list<u8>, guild-id: u64, channel-id: u64);
 }
 

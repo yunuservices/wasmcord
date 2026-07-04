@@ -1,21 +1,10 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, StreamExt};
-use twilight_http::Client as HttpClient;
 use twilight_model::gateway::ShardId;
 
 use super::events;
 
-pub type SharedHttp = Arc<HttpClient>;
-
-pub fn create_http_client() -> Result<HttpClient> {
-    let token = std::env::var("DISCORD_TOKEN")?;
-    Ok(HttpClient::new(token))
-}
-
 pub async fn connect(
-    http: SharedHttp,
     manager: crate::wasm::loader::PluginManager,
 ) -> Result<(Shard, tokio::task::JoinHandle<Result<()>>)> {
     let token = std::env::var("DISCORD_TOKEN")?;
@@ -23,7 +12,7 @@ pub async fn connect(
 
     let shard = Shard::new(ShardId::ONE, token, intents);
     let handle = tokio::spawn(async move {
-        bot_loop(shard, http, manager).await
+        bot_loop(shard, manager).await
     });
 
     let placeholder = Shard::new(ShardId::ONE, String::new(), Intents::empty());
@@ -32,7 +21,6 @@ pub async fn connect(
 
 async fn bot_loop(
     mut shard: Shard,
-    http: SharedHttp,
     manager: crate::wasm::loader::PluginManager,
 ) -> Result<()> {
     tracing::info!("Connecting to Discord gateway...");
@@ -46,7 +34,15 @@ async fn bot_loop(
             }
         };
 
-        if let Err(e) = handle_event(event, &http, &manager).await {
+        manager.set_gateway_ping_ms(
+            shard
+                .latency()
+                .average()
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        );
+
+        if let Err(e) = handle_event(event, &manager).await {
             tracing::error!(?e, "Event handler error");
         }
     }
@@ -56,7 +52,6 @@ async fn bot_loop(
 
 async fn handle_event(
     event: Event,
-    _http: &SharedHttp,
     manager: &crate::wasm::loader::PluginManager,
 ) -> Result<()> {
     match event {
@@ -66,11 +61,15 @@ async fn handle_event(
                 "Bot is ready"
             );
 
-            manager.dispatch_event("ready", Vec::new(), 0, 0).await;
+            let payload = serde_json::to_vec(&ready)?;
+            manager.dispatch_event("ready", payload, 0, 0).await;
             events::ready::handle(manager).await?;
         }
         Event::MessageCreate(msg) => {
             events::message::handle(&msg, manager).await?;
+        }
+        Event::InteractionCreate(interaction) => {
+            events::interaction::handle(&interaction, manager).await?;
         }
         _ => {}
     }
