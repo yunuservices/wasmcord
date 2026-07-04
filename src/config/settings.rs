@@ -16,7 +16,7 @@ impl Config {
             discord_token: env("DISCORD_TOKEN"),
             plugin_dir: env_opt("PLUGIN_DIR")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("wasm-plugins/plugins")),
+                .unwrap_or_else(|| PathBuf::from("plugins")),
             log_level: env_opt("LOG_LEVEL")
                 .unwrap_or_else(|| "ynsrvcs=info".into()),
             database_url: env_opt("DATABASE_URL"),

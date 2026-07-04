@@ -47,12 +47,17 @@ impl WasiView for HostContext {
 
 impl plugin::ynsrvcs::plugins::host::Host for HostContext {
     fn send_message(&mut self, channel_id: u64, content: String) -> Result<(), String> {
-        use std::future::IntoFuture;
-
-        let handle = tokio::runtime::Handle::current();
-        let msg = self.http.create_message(Id::<ChannelMarker>::new(channel_id));
-        let msg = msg.content(&content).into_future();
-        handle.block_on(msg).map_err(|e| e.to_string()).map(|_| ())
+        let http = Arc::clone(&self.http);
+        tokio::spawn(async move {
+            if let Err(e) = http
+                .create_message(Id::<ChannelMarker>::new(channel_id))
+                .content(&content)
+                .await
+            {
+                tracing::error!(?e, "plugin send_message failed");
+            }
+        });
+        Ok(())
     }
 
     fn send_interaction_response(
@@ -70,14 +75,16 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
         method: String,
         body: Vec<u8>,
     ) -> Result<Vec<u8>, String> {
-        let agent = ureq::agent();
-        let http_req = http::Request::builder()
-            .method(method.as_str())
-            .uri(url.as_str())
-            .body(body)
-            .map_err(|e| e.to_string())?;
-        let resp = agent.run(http_req).map_err(|e| e.to_string())?;
-        resp.into_body().read_to_vec().map_err(|e| e.to_string())
+        tokio::task::block_in_place(|| {
+            let agent = ureq::agent();
+            let http_req = http::Request::builder()
+                .method(method.as_str())
+                .uri(url.as_str())
+                .body(body)
+                .map_err(|e| e.to_string())?;
+            let resp = agent.run(http_req).map_err(|e| e.to_string())?;
+            resp.into_body().read_to_vec().map_err(|e| e.to_string())
+        })
     }
 
     fn log(&mut self, level: String, message: String) {
@@ -122,8 +129,8 @@ impl PluginManager {
         let dir = plugin_dir();
         let path = Path::new(&dir);
         if !path.exists() {
-            info!("Plugin directory does not exist: {dir}");
-            return Ok(());
+            tokio::fs::create_dir_all(path).await?;
+            info!("Created plugin directory: {dir}");
         }
 
         let mut entries = Vec::new();
@@ -272,18 +279,62 @@ impl PluginManager {
 mod tests {
     use super::*;
 
+    fn ensure_ping_wasm() -> Result<std::path::PathBuf> {
+        let root = std::env::var("CARGO_MANIFEST_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        let wasm_path = root.join("plugins").join("ping.wasm");
+        if wasm_path.exists() {
+            return Ok(wasm_path);
+        }
+
+        let plugin_dir = root.join("example-plugin");
+        let output = std::process::Command::new("cargo")
+            .args([
+                "build",
+                "--target",
+                "wasm32-wasip2",
+                "--manifest-path",
+                plugin_dir.join("Cargo.toml").to_str().unwrap(),
+            ])
+            .output()
+            .expect("failed to build example-plugin");
+
+        if !output.status.success() {
+            panic!(
+                "example-plugin build failed:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let artifact = plugin_dir
+            .join("target")
+            .join("wasm32-wasip2")
+            .join("debug")
+            .join("ping_plugin.wasm");
+        if !artifact.exists() {
+            panic!("expected wasm artifact at {}", artifact.display());
+        }
+
+        std::fs::create_dir_all(wasm_path.parent().unwrap())?;
+        std::fs::copy(&artifact, &wasm_path)?;
+        Ok(wasm_path)
+    }
+
     #[tokio::test]
     async fn test_load_ping_plugin() -> Result<()> {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("info")
             .try_init();
 
+        let wasm_path = ensure_ping_wasm()?;
         let engine = crate::wasm::plugin::create_engine()?;
         let http = Arc::new(HttpClient::new("fake-token".to_string()));
         let (name, mut loaded) = PluginManager::load_one(
             &engine,
             &http,
-            Path::new("plugins/ping.wasm"),
+            &wasm_path,
         )
         .await?;
 
