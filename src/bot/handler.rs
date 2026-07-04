@@ -1,8 +1,7 @@
 use anyhow::Result;
-use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, StreamExt};
+use tokio_stream::StreamExt;
+use twilight_gateway::{Intents, Message, Shard};
 use twilight_model::gateway::ShardId;
-
-use super::events;
 
 pub async fn connect(
     manager: crate::wasm::loader::PluginManager,
@@ -25,14 +24,61 @@ async fn bot_loop(
 ) -> Result<()> {
     tracing::info!("Connecting to Discord gateway...");
 
-    while let Some(item) = shard.next_event(EventTypeFlags::all()).await {
-        let event = match item {
-            Ok(e) => e,
+    while let Some(item) = shard.next().await {
+        let msg = match item {
+            Ok(m) => m,
             Err(e) => {
                 tracing::warn!(?e, "Gateway receive error");
                 continue;
             }
         };
+
+        let text = match msg {
+            Message::Text(t) => t,
+            Message::Close(_) => break,
+        };
+
+        let payload: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(?e, "Failed to parse gateway message");
+                continue;
+            }
+        };
+
+        if payload.get("op").and_then(|v| v.as_u64()) != Some(0) {
+            continue;
+        }
+
+        let event_name = payload
+            .get("t")
+            .and_then(|v| v.as_str())
+            .unwrap_or("UNKNOWN")
+            .to_string();
+        let data = payload.get("d").cloned().unwrap_or_default();
+        let data_bytes = serde_json::to_vec(&data)?;
+
+        if event_name == "READY" {
+            let user = data.get("user").and_then(|u| u.get("username")).and_then(|v| v.as_str());
+            tracing::info!(user = ?user, "Bot is ready");
+        }
+
+        let guild_id = data
+            .get("guild_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let channel_id = data
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .or_else(|| {
+                data.get("channel")
+                    .and_then(|c| c.get("id"))
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse().ok())
+            })
+            .unwrap_or(0);
 
         manager.set_gateway_ping_ms(
             shard
@@ -42,36 +88,9 @@ async fn bot_loop(
                 .unwrap_or(0),
         );
 
-        if let Err(e) = handle_event(event, &manager).await {
-            tracing::error!(?e, "Event handler error");
-        }
-    }
-
-    Ok(())
-}
-
-async fn handle_event(
-    event: Event,
-    manager: &crate::wasm::loader::PluginManager,
-) -> Result<()> {
-    match event {
-        Event::Ready(ready) => {
-            tracing::info!(
-                user = ?ready.user.name,
-                "Bot is ready"
-            );
-
-            let payload = serde_json::to_vec(&ready)?;
-            manager.dispatch_event("ready", payload, 0, 0).await;
-            events::ready::handle(manager).await?;
-        }
-        Event::MessageCreate(msg) => {
-            events::message::handle(&msg, manager).await?;
-        }
-        Event::InteractionCreate(interaction) => {
-            events::interaction::handle(&interaction, manager).await?;
-        }
-        _ => {}
+        manager
+            .dispatch_event(&event_name, data_bytes, guild_id, channel_id)
+            .await;
     }
 
     Ok(())

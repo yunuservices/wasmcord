@@ -2,9 +2,9 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex;
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::info;
 use wasmtime::component::Component;
 use wasmtime::Engine;
@@ -18,14 +18,19 @@ pub struct HostContext {
     wasi: WasiCtx,
     table: ResourceTable,
     gateway_ping_ms: Arc<AtomicU64>,
+    kv: Arc<Mutex<HashMap<(String, String), Vec<u8>>>>,
 }
 
 impl HostContext {
-    pub fn new(gateway_ping_ms: Arc<AtomicU64>) -> Self {
+    pub fn new(
+        gateway_ping_ms: Arc<AtomicU64>,
+        kv: Arc<Mutex<HashMap<(String, String), Vec<u8>>>>,
+    ) -> Self {
         Self {
             wasi: WasiCtxBuilder::new().build(),
             table: ResourceTable::default(),
             gateway_ping_ms,
+            kv,
         }
     }
 }
@@ -60,10 +65,7 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
             let resp = agent.run(http_req).map_err(|e| e.to_string())?;
             let status: u16 = resp.status().into();
             let body = resp.into_body().read_to_vec().map_err(|e| e.to_string())?;
-            Ok(plugin::ynsrvcs::plugins::host::Response {
-                status,
-                body,
-            })
+            Ok(plugin::ynsrvcs::plugins::host::Response { status, body })
         })
     }
 
@@ -92,6 +94,24 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
             _ => tracing::info!("{message}"),
         }
     }
+
+    fn kv_get(&mut self, scope: String, key: String) -> Option<Vec<u8>> {
+        self.kv.lock().ok()?.get(&(scope, key)).cloned()
+    }
+
+    fn kv_set(&mut self, scope: String, key: String, value: Vec<u8>) {
+        if let Ok(mut kv) = self.kv.lock() {
+            kv.insert((scope, key), value);
+        }
+    }
+
+    fn fs_read(&mut self, path: String) -> Result<Vec<u8>, String> {
+        tokio::task::block_in_place(|| std::fs::read(&path).map_err(|e| e.to_string()))
+    }
+
+    fn fs_write(&mut self, path: String, content: Vec<u8>) -> Result<(), String> {
+        tokio::task::block_in_place(|| std::fs::write(&path, &content).map_err(|e| e.to_string()))
+    }
 }
 
 pub(crate) struct LoadedPlugin {
@@ -101,9 +121,10 @@ pub(crate) struct LoadedPlugin {
 
 #[derive(Clone)]
 pub struct PluginManager {
-    plugins: Arc<Mutex<HashMap<String, LoadedPlugin>>>,
+    plugins: Arc<AsyncMutex<HashMap<String, LoadedPlugin>>>,
     engine: Arc<Engine>,
     gateway_ping_ms: Arc<AtomicU64>,
+    kv: Arc<Mutex<HashMap<(String, String), Vec<u8>>>>,
 }
 
 pub fn plugin_dir() -> String {
@@ -113,9 +134,10 @@ pub fn plugin_dir() -> String {
 impl PluginManager {
     pub fn new(engine: &Engine) -> Result<Self> {
         Ok(Self {
-            plugins: Arc::new(Mutex::new(HashMap::new())),
+            plugins: Arc::new(AsyncMutex::new(HashMap::new())),
             engine: Arc::new(engine.clone()),
             gateway_ping_ms: Arc::new(AtomicU64::new(0)),
+            kv: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -145,6 +167,7 @@ impl PluginManager {
             match Self::load_one(
                 &self.engine,
                 Arc::clone(&self.gateway_ping_ms),
+                Arc::clone(&self.kv),
                 wasm_path,
             )
             .await
@@ -177,6 +200,7 @@ impl PluginManager {
     pub(crate) async fn load_one(
         engine: &Engine,
         gateway_ping_ms: Arc<AtomicU64>,
+        kv: Arc<Mutex<HashMap<(String, String), Vec<u8>>>>,
         wasm_path: &Path,
     ) -> Result<(String, LoadedPlugin)> {
         let bytes = tokio::fs::read(wasm_path).await?;
@@ -192,7 +216,7 @@ impl PluginManager {
             |s: &mut HostContext| s,
         )?;
 
-        let mut store = Store::new(engine, HostContext::new(gateway_ping_ms));
+        let mut store = Store::new(engine, HostContext::new(gateway_ping_ms, kv));
         let world = plugin::PluginWorld::instantiate_async(&mut store, &component, &linker).await?;
 
         Ok((
@@ -208,6 +232,7 @@ impl PluginManager {
         let (name, loaded) = Self::load_one(
             &self.engine,
             Arc::clone(&self.gateway_ping_ms),
+            Arc::clone(&self.kv),
             wasm_path,
         )
         .await?;
@@ -240,25 +265,12 @@ impl PluginManager {
         guild_id: u64,
         channel_id: u64,
     ) {
-        use plugin::exports::ynsrvcs::plugins::plugin::EventType;
-
-        let et = match event_type {
-            "ready" => EventType::Ready,
-            "message-create" => EventType::MessageCreate,
-            "interaction-create" => EventType::InteractionCreate,
-            "guild-member-add" => EventType::GuildMemberAdd,
-            "guild-member-remove" => EventType::GuildMemberRemove,
-            "reaction-add" => EventType::ReactionAdd,
-            "voice-state-update" => EventType::VoiceStateUpdate,
-            _ => return,
-        };
-
         let mut plugins = self.plugins.lock().await;
         for (_name, loaded) in plugins.iter_mut() {
             let guest = loaded.world.ynsrvcs_plugins_plugin();
             if let Err(e) = guest.call_handle_event(
                 &mut loaded.store,
-                et,
+                event_type,
                 &payload,
                 guild_id,
                 channel_id,
@@ -327,6 +339,7 @@ mod tests {
         let (name, mut loaded) = PluginManager::load_one(
             &engine,
             Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
             &wasm_path,
         )
         .await?;
@@ -335,7 +348,7 @@ mod tests {
 
         loaded.world.ynsrvcs_plugins_plugin().call_handle_event(
             &mut loaded.store,
-            plugin::exports::ynsrvcs::plugins::plugin::EventType::MessageCreate,
+            "MESSAGE_CREATE",
             b"hello",
             0,
             0,

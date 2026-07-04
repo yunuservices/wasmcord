@@ -10,6 +10,7 @@ twilight-http = "0.17"
 twilight-model = "0.17"
 twilight-util = { version = "0.17", features = ["builder"] }
 tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
 anyhow = "1"
 dotenvy = "0.15"
 tracing = "0.1"

@@ -11,20 +11,16 @@ interface host {
     gateway-ping: func() -> u64;
     now-ms: func() -> u64;
     log: func(level: string, message: string);
+
+    kv-get: func(scope: string, key: string) -> option<list<u8>>;
+    kv-set: func(scope: string, key: string, value: list<u8>);
+
+    fs-read: func(path: string) -> result<list<u8>, string>;
+    fs-write: func(path: string, content: list<u8>) -> result<_, string>;
 }
 
 interface plugin {
-    enum event-type {
-        ready,
-        message-create,
-        interaction-create,
-        guild-member-add,
-        guild-member-remove,
-        reaction-add,
-        voice-state-update,
-    }
-
-    handle-event: func(event-type: event-type, payload: list<u8>, guild-id: u64, channel-id: u64);
+    handle-event: func(event-type: string, payload: list<u8>, guild-id: u64, channel-id: u64);
 }
 
 world plugin-world {
