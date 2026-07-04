@@ -126,6 +126,11 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
     }
 
     async fn fs_write(&mut self, path: String, content: Vec<u8>) -> Result<(), String> {
+        if let Some(parent) = Path::new(&path).parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
         tokio::fs::write(&path, &content)
             .await
             .map_err(|e| e.to_string())
@@ -374,7 +379,6 @@ mod tests {
             &wasm_path,
         )
         .await?;
-
         assert_eq!(name, "ping");
 
         loaded.world.ynsrvcs_plugins_plugin().call_handle_event(
