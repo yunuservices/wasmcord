@@ -1,17 +1,18 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::info;
-use wasmtime::component::Component;
 use wasmtime::Engine;
 use wasmtime::Store;
+use wasmtime::component::Component;
 use wasmtime::component::ResourceTable;
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView, WasiCtxView};
+use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
+use super::kv::KvStore;
 use super::plugin;
 
 const PLUGIN_CALL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -22,14 +23,11 @@ pub struct HostContext {
     table: ResourceTable,
     client: reqwest::Client,
     gateway_ping_ms: Arc<AtomicU64>,
-    kv: Arc<Mutex<HashMap<(String, String), Vec<u8>>>>,
+    kv: KvStore,
 }
 
 impl HostContext {
-    pub fn new(
-        gateway_ping_ms: Arc<AtomicU64>,
-        kv: Arc<Mutex<HashMap<(String, String), Vec<u8>>>>,
-    ) -> Self {
+    pub fn new(gateway_ping_ms: Arc<AtomicU64>, kv: KvStore) -> Self {
         Self {
             wasi: WasiCtxBuilder::new().build(),
             table: ResourceTable::default(),
@@ -60,8 +58,7 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
         url: String,
         body: Vec<u8>,
     ) -> Result<plugin::ynsrvcs::plugins::host::Response, String> {
-        let method = reqwest::Method::from_bytes(method.as_bytes())
-            .map_err(|e| e.to_string())?;
+        let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
 
         let req = self
             .client
@@ -76,11 +73,7 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
             .map_err(|e| e.to_string())?;
 
         let status = resp.status().as_u16();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| e.to_string())?
-            .to_vec();
+        let body = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
 
         Ok(plugin::ynsrvcs::plugins::host::Response { status, body })
     }
@@ -112,13 +105,11 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
     }
 
     async fn kv_get(&mut self, scope: String, key: String) -> Option<Vec<u8>> {
-        self.kv.lock().ok()?.get(&(scope, key)).cloned()
+        self.kv.get(&scope, &key)
     }
 
     async fn kv_set(&mut self, scope: String, key: String, value: Vec<u8>) {
-        if let Ok(mut kv) = self.kv.lock() {
-            kv.insert((scope, key), value);
-        }
+        self.kv.set(scope, key, value);
     }
 
     async fn fs_read(&mut self, path: String) -> Result<Vec<u8>, String> {
@@ -147,7 +138,7 @@ pub struct PluginManager {
     plugins: Arc<AsyncMutex<HashMap<String, LoadedPlugin>>>,
     engine: Arc<Engine>,
     gateway_ping_ms: Arc<AtomicU64>,
-    kv: Arc<Mutex<HashMap<(String, String), Vec<u8>>>>,
+    kv: KvStore,
 }
 
 pub fn plugin_dir() -> String {
@@ -160,7 +151,7 @@ impl PluginManager {
             plugins: Arc::new(AsyncMutex::new(HashMap::new())),
             engine: Arc::new(engine.clone()),
             gateway_ping_ms: Arc::new(AtomicU64::new(0)),
-            kv: Arc::new(Mutex::new(HashMap::new())),
+            kv: KvStore::load_or_default(super::kv::kv_path())?,
         })
     }
 
@@ -190,7 +181,7 @@ impl PluginManager {
             match Self::load_one(
                 &self.engine,
                 Arc::clone(&self.gateway_ping_ms),
-                Arc::clone(&self.kv),
+                self.kv.clone(),
                 wasm_path,
             )
             .await
@@ -223,7 +214,7 @@ impl PluginManager {
     pub(crate) async fn load_one(
         engine: &Engine,
         gateway_ping_ms: Arc<AtomicU64>,
-        kv: Arc<Mutex<HashMap<(String, String), Vec<u8>>>>,
+        kv: KvStore,
         wasm_path: &Path,
     ) -> Result<(String, LoadedPlugin)> {
         let bytes = tokio::fs::read(wasm_path).await?;
@@ -242,20 +233,14 @@ impl PluginManager {
         let mut store = Store::new(engine, HostContext::new(gateway_ping_ms, kv));
         let world = plugin::PluginWorld::instantiate_async(&mut store, &component, &linker).await?;
 
-        Ok((
-            name,
-            LoadedPlugin {
-                world,
-                store,
-            },
-        ))
+        Ok((name, LoadedPlugin { world, store }))
     }
 
     pub async fn load(&self, wasm_path: &Path) -> Result<String> {
         let (name, loaded) = Self::load_one(
             &self.engine,
             Arc::clone(&self.gateway_ping_ms),
-            Arc::clone(&self.kv),
+            self.kv.clone(),
             wasm_path,
         )
         .await?;
@@ -275,6 +260,10 @@ impl PluginManager {
         for name in names {
             self.unload(&name).await;
         }
+    }
+
+    pub fn save_kv(&self) -> Result<()> {
+        self.kv.save()
     }
 
     pub async fn unload_by_path(&self, wasm_path: &Path) {
@@ -366,28 +355,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_ping_plugin() -> Result<()> {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("info")
-            .try_init();
+        let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
 
         let wasm_path = ensure_ping_wasm()?;
         let engine = crate::wasm::plugin::create_engine()?;
         let (name, mut loaded) = PluginManager::load_one(
             &engine,
             Arc::new(AtomicU64::new(0)),
-            Arc::new(Mutex::new(HashMap::new())),
+            KvStore::with_path(std::env::temp_dir().join("ynsrvcs-test-kv.json")),
             &wasm_path,
         )
         .await?;
         assert_eq!(name, "ping");
 
-        loaded.world.ynsrvcs_plugins_plugin().call_handle_event(
-            &mut loaded.store,
-            "MESSAGE_CREATE",
-            b"hello",
-            0,
-            0,
-        ).await?;
+        loaded
+            .world
+            .ynsrvcs_plugins_plugin()
+            .call_handle_event(&mut loaded.store, "MESSAGE_CREATE", b"hello", 0, 0)
+            .await?;
 
         Ok(())
     }

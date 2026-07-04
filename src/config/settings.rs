@@ -15,8 +15,7 @@ impl Config {
             plugin_dir: env_opt("PLUGIN_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("plugins")),
-            log_level: env_opt("LOG_LEVEL")
-                .unwrap_or_else(|| "ynsrvcs=info".into()),
+            log_level: env_opt("LOG_LEVEL").unwrap_or_else(|| "ynsrvcs=info".into()),
             gateway_intents: env_opt("GATEWAY_INTENTS")
                 .map(|v| v.split(',').map(String::from).collect())
                 .unwrap_or_else(|| vec!["GUILD_MESSAGES".into(), "MESSAGE_CONTENT".into()]),

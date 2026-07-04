@@ -14,9 +14,7 @@ pub async fn connect(
 
     let shard = Shard::new(ShardId::ONE, token, intents);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let handle = tokio::spawn(async move {
-        bot_loop(shard, manager, shutdown_rx).await
-    });
+    let handle = tokio::spawn(async move { bot_loop(shard, manager, shutdown_rx).await });
 
     Ok((shutdown_tx, handle))
 }
@@ -72,7 +70,10 @@ async fn bot_loop(
         let data_bytes = serde_json::to_vec(&data)?;
 
         if event_name == "READY" {
-            let user = data.get("user").and_then(|u| u.get("username")).and_then(|v| v.as_str());
+            let user = data
+                .get("user")
+                .and_then(|u| u.get("username"))
+                .and_then(|v| v.as_str());
             tracing::info!(user = ?user, "Bot is ready");
         }
 
