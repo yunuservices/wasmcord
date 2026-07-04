@@ -1,0 +1,33 @@
+package ynsrvcs:plugins@0.1.0;
+
+interface host {
+    send-message: func(channel-id: u64, content: string) -> result<_, string>;
+    send-interaction-response: func(interaction-id: u64, token: string, content: string) -> result<_, string>;
+    http-request: func(url: string, method: string, body: list<u8>) -> result<list<u8>, string>;
+    log: func(level: string, message: string);
+}
+
+interface plugin {
+    enum event-type {
+        ready,
+        message-create,
+        interaction-create,
+        guild-member-add,
+        guild-member-remove,
+        reaction-add,
+        voice-state-update,
+    }
+
+    record command {
+        name: string,
+        description: string,
+    }
+
+    init: func() -> list<command>;
+    handle-event: func(event-type: event-type, payload: list<u8>, guild-id: u64, channel-id: u64);
+}
+
+world plugin-world {
+    import host;
+    export plugin;
+}
