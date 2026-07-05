@@ -124,6 +124,11 @@ const PLUGIN_FUEL: u64 = 50_000_000;
 const FUEL_ASYNC_YIELD_INTERVAL: u64 = 10_000;
 const PLUGIN_HOSTCALL_FUEL: usize = 1_000_000;
 
+fn is_discord_api_url(url: &str) -> bool {
+    url.starts_with("https://discord.com/api/")
+        || url.starts_with("https://canary.discord.com/api/")
+}
+
 pub struct HostContext {
     wasi: WasiCtx,
     table: wasmtime::component::ResourceTable,
@@ -181,12 +186,13 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
 
         let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
 
-        let req = self
-            .client
-            .request(method, &url)
-            .body(body)
-            .build()
-            .map_err(|e| e.to_string())?;
+        let mut req_builder = self.client.request(method, &url).body(body);
+        if is_discord_api_url(&url)
+            && let Ok(token) = std::env::var("DISCORD_TOKEN")
+        {
+            req_builder = req_builder.header("Authorization", format!("Bot {token}"));
+        }
+        let req = req_builder.build().map_err(|e| e.to_string())?;
 
         let resp = tokio::time::timeout(HTTP_TIMEOUT, self.client.execute(req))
             .await
@@ -194,6 +200,9 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
             .map_err(|e| e.to_string())?;
 
         let status = resp.status().as_u16();
+        if status >= 400 {
+            tracing::warn!("http_request returned {status} for {url}");
+        }
         let body = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
 
         Ok(plugin::ynsrvcs::plugins::host::Response { status, body })
