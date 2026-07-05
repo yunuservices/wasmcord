@@ -186,13 +186,16 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
 
         let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
 
-        let mut req_builder = self.client.request(method, &url).body(body);
-        if is_discord_api_url(&url)
-            && let Ok(token) = std::env::var("DISCORD_TOKEN")
-        {
-            req_builder = req_builder.header("Authorization", format!("Bot {token}"));
+        let mut req_builder = self.client.request(method, &url);
+        if is_discord_api_url(&url) {
+            if let Ok(token) = std::env::var("DISCORD_TOKEN") {
+                req_builder = req_builder.header("Authorization", format!("Bot {token}"));
+            }
+            if !body.is_empty() {
+                req_builder = req_builder.header("Content-Type", "application/json");
+            }
         }
-        let req = req_builder.build().map_err(|e| e.to_string())?;
+        let req = req_builder.body(body).build().map_err(|e| e.to_string())?;
 
         let resp = tokio::time::timeout(HTTP_TIMEOUT, self.client.execute(req))
             .await
@@ -200,10 +203,11 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
             .map_err(|e| e.to_string())?;
 
         let status = resp.status().as_u16();
-        if status >= 400 {
-            tracing::warn!("http_request returned {status} for {url}");
-        }
         let body = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
+        if status >= 400 {
+            let text = String::from_utf8_lossy(&body);
+            tracing::warn!("http_request returned {status} for {url}: {text}");
+        }
 
         Ok(plugin::ynsrvcs::plugins::host::Response { status, body })
     }
