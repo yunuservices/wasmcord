@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
+use serde::Deserialize;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::info;
 use wasmtime::component::{Component, Linker};
@@ -13,6 +14,20 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use super::kv::KvStore;
 use super::plugin;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+pub struct PluginPermissions {
+    #[serde(default)]
+    pub http: bool,
+    #[serde(default)]
+    pub fs_read: bool,
+    #[serde(default)]
+    pub fs_write: bool,
+    #[serde(default)]
+    pub env: bool,
+    #[serde(default)]
+    pub kv: bool,
+}
 
 const PLUGIN_CALL_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -24,10 +39,16 @@ pub struct HostContext {
     gateway_ping_ms: Arc<AtomicU64>,
     kv: KvStore,
     workspace: PathBuf,
+    permissions: PluginPermissions,
 }
 
 impl HostContext {
-    pub fn new(gateway_ping_ms: Arc<AtomicU64>, kv: KvStore, workspace: PathBuf) -> Self {
+    pub fn new(
+        gateway_ping_ms: Arc<AtomicU64>,
+        kv: KvStore,
+        workspace: PathBuf,
+        permissions: PluginPermissions,
+    ) -> Self {
         Self {
             wasi: WasiCtxBuilder::new().build(),
             table: wasmtime::component::ResourceTable::default(),
@@ -35,6 +56,7 @@ impl HostContext {
             gateway_ping_ms,
             kv,
             workspace,
+            permissions,
         }
     }
 }
@@ -59,6 +81,10 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
         url: String,
         body: Vec<u8>,
     ) -> Result<plugin::ynsrvcs::plugins::host::Response, String> {
+        if !self.permissions.http {
+            return Err("http requests are not permitted".to_string());
+        }
+
         let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
 
         let req = self
@@ -80,6 +106,10 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
     }
 
     async fn get_env(&mut self, name: String) -> Option<String> {
+        if !self.permissions.env {
+            return None;
+        }
+
         std::env::var(&name).ok().filter(|v| !v.is_empty())
     }
 
@@ -106,18 +136,34 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
     }
 
     async fn kv_get(&mut self, scope: String, key: String) -> Option<Vec<u8>> {
+        if !self.permissions.kv {
+            return None;
+        }
+
         self.kv.get(&scope, &key)
     }
 
     async fn kv_set(&mut self, scope: String, key: String, value: Vec<u8>) {
+        if !self.permissions.kv {
+            return;
+        }
+
         self.kv.set(scope, key, value);
     }
 
     async fn fs_read(&mut self, path: String) -> Result<Vec<u8>, String> {
+        if !self.permissions.fs_read {
+            return Err("fs read is not permitted".to_string());
+        }
+
         tokio::fs::read(self.workspace.join(path)).await.map_err(|e| e.to_string())
     }
 
     async fn fs_write(&mut self, path: String, content: Vec<u8>) -> Result<(), String> {
+        if !self.permissions.fs_write {
+            return Err("fs write is not permitted".to_string());
+        }
+
         let path = self.workspace.join(path);
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
@@ -132,6 +178,7 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
 
 pub(crate) struct LoadedPlugin {
     component: Arc<Component>,
+    permissions: PluginPermissions,
 }
 
 #[derive(Clone)]
@@ -150,6 +197,25 @@ pub fn plugin_dir() -> PathBuf {
 
 fn workspace_path(name: &str) -> PathBuf {
     plugin_dir().join(name).join("workspace")
+}
+
+async fn load_permissions(wasm_path: &Path) -> PluginPermissions {
+    let config_path = wasm_path.with_extension("json");
+
+    if !config_path.exists() {
+        return PluginPermissions::default();
+    }
+
+    match tokio::fs::read_to_string(&config_path).await {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+        Err(err) => {
+            tracing::warn!(
+                "Failed to read permission config at {}: {err}",
+                config_path.display()
+            );
+            PluginPermissions::default()
+        }
+    }
 }
 
 fn create_linker(engine: &Engine) -> Result<Linker<HostContext>> {
@@ -233,11 +299,12 @@ impl PluginManager {
 
         let component = Component::new(engine, &bytes)?;
         let workspace = workspace_path(&name);
+        let permissions = load_permissions(wasm_path).await;
         tokio::fs::create_dir_all(&workspace).await?;
 
         let mut store = Store::new(
             engine,
-            HostContext::new(gateway_ping_ms, kv.clone(), workspace.clone()),
+            HostContext::new(gateway_ping_ms, kv.clone(), workspace.clone(), permissions),
         );
         let linker = create_linker(engine)?;
         let instance = plugin::PluginWorld::instantiate_async(&mut store, &component, &linker).await?;
@@ -254,6 +321,7 @@ impl PluginManager {
 
         Ok((name, LoadedPlugin {
             component: Arc::new(component),
+            permissions,
         }))
     }
 
@@ -272,16 +340,17 @@ impl PluginManager {
     pub async fn unload(&self, name: &str) {
         let maybe_loaded = {
             let plugins = self.plugins.lock().await;
-            plugins.get(name).map(|loaded| Arc::clone(&loaded.component))
+            plugins.get(name).map(|loaded| (Arc::clone(&loaded.component), loaded.permissions))
         };
 
-        if let Some(component) = maybe_loaded {
+        if let Some((component, permissions)) = maybe_loaded {
             let mut store = Store::new(
                 &self.engine,
                 HostContext::new(
                     Arc::clone(&self.gateway_ping_ms),
                     self.kv.clone(),
                     workspace_path(name),
+                    permissions,
                 ),
             );
             let linker = match create_linker(&self.engine) {
@@ -347,11 +416,17 @@ impl PluginManager {
             let guard = self.plugins.lock().await;
             guard
                 .iter()
-                .map(|(name, loaded)| (name.clone(), Arc::clone(&loaded.component)))
+                .map(|(name, loaded)| {
+                    (
+                        name.clone(),
+                        Arc::clone(&loaded.component),
+                        loaded.permissions,
+                    )
+                })
                 .collect::<Vec<_>>()
         };
 
-        for (name, component) in plugins {
+        for (name, component, permissions) in plugins {
             let engine = Arc::clone(&self.engine);
             let gateway_ping_ms = Arc::clone(&self.gateway_ping_ms);
             let kv = self.kv.clone();
@@ -363,7 +438,7 @@ impl PluginManager {
             let handle = async move {
                 let mut store = Store::new(
                     &engine,
-                    HostContext::new(gateway_ping_ms, kv, workspace),
+                    HostContext::new(gateway_ping_ms, kv, workspace, permissions),
                 );
                 let linker = match create_linker(&engine) {
                     Ok(l) => l,

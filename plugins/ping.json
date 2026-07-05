@@ -1,0 +1,7 @@
+{
+  "http": true,
+  "env": false,
+  "kv": false,
+  "fs_read": false,
+  "fs_write": false
+}
