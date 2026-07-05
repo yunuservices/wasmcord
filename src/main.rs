@@ -16,7 +16,7 @@ fn load_env() {
 
     let loaded_from_exe = exe_env
         .as_deref()
-        .map_or(false, |path| dotenvy::from_path(path).is_ok());
+        .is_some_and(|path| dotenvy::from_path(path).is_ok());
 
     if !loaded_from_exe {
         let _ = dotenvy::dotenv();
