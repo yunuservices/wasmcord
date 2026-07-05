@@ -9,23 +9,27 @@ use crate::ynsrvcs::plugins::host::http_request;
 struct PingPlugin;
 
 impl Guest for PingPlugin {
+    fn initialize(_settings: Option<String>) -> Result<(), String> {
+        Ok(())
+    }
+
     fn handle_event(
         event_type: String,
         payload: Vec<u8>,
         _guild_id: u64,
         _channel_id: u64,
-    ) {
+    ) -> Result<(), String> {
         if event_type != "MESSAGE_CREATE" {
-            return;
+            return Ok(());
         }
 
         let Ok(event) = serde_json::from_slice::<serde_json::Value>(&payload) else {
-            return;
+            return Ok(());
         };
 
         let content = event.get("content").and_then(|v| v.as_str()).unwrap_or("");
         if content.trim() != "!ping" {
-            return;
+            return Ok(());
         }
 
         let channel_id = event
@@ -33,7 +37,7 @@ impl Guest for PingPlugin {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         if channel_id.is_empty() {
-            return;
+            return Ok(());
         }
 
         let body = serde_json::json!({ "content": "Pong!" }).to_string();
@@ -42,6 +46,12 @@ impl Guest for PingPlugin {
             &format!("https://discord.com/api/v10/channels/{channel_id}/messages"),
             &body.into_bytes(),
         );
+
+        Ok(())
+    }
+
+    fn shutdown() -> Result<(), String> {
+        Ok(())
     }
 }
 
