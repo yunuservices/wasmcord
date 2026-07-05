@@ -7,6 +7,7 @@ interface host {
     }
 
     http-request: func(method: string, url: string, body: list<u8>) -> result<response, string>;
+    application-id: func() -> option<string>;
     get-env: func(name: string) -> option<string>;
     gateway-ping: func() -> u64;
     now-ms: func() -> u64;

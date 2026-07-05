@@ -143,6 +143,14 @@ async fn bot_loop(
                 .get("user")
                 .and_then(|u| u.get("username"))
                 .and_then(|v| v.as_str());
+            if let Some(app_id) = data
+                .get("application")
+                .and_then(|a| a.get("id"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok())
+            {
+                manager.set_application_id(app_id);
+            }
             tracing::info!(user = ?user, ?shard_id, "Bot is ready");
         }
 

@@ -3,13 +3,72 @@ wit_bindgen::generate!({
     path: "wit",
 });
 
+use std::cell::RefCell;
+
 use crate::exports::ynsrvcs::plugins::plugin::Guest;
-use crate::ynsrvcs::plugins::host::http_request;
+use crate::ynsrvcs::plugins::host::{application_id, http_request};
+
+thread_local! {
+    static APP_ID: RefCell<Option<String>> = RefCell::new(None);
+}
 
 struct PingPlugin;
 
+fn register_ping_command(app_id: &str) {
+    let url = format!(
+        "https://discord.com/api/v10/applications/{app_id}/commands"
+    );
+    let body = serde_json::json!([
+        {
+            "name": "ping",
+            "description": "Ping!",
+            "type": 1
+        }
+    ])
+    .to_string();
+    let _ = http_request("PUT", &url, &body.into_bytes());
+}
+
+fn ensure_command_registered() {
+    let id = application_id().or_else(|| APP_ID.with(|a| a.borrow().clone()));
+    if let Some(id) = id {
+        register_ping_command(&id);
+        APP_ID.with(|a| *a.borrow_mut() = Some(id));
+    }
+}
+
+fn handle_interaction(event: &serde_json::Value) {
+    let Some(name) = event
+        .get("data")
+        .and_then(|d| d.get("name"))
+        .and_then(|v| v.as_str())
+    else {
+        return;
+    };
+    if name != "ping" {
+        return;
+    }
+    let Some(id) = event.get("id").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let Some(token) = event.get("token").and_then(|v| v.as_str()) else {
+        return;
+    };
+
+    let body = serde_json::json!({
+        "type": 4,
+        "data": { "content": "Pong!" }
+    })
+    .to_string();
+    let url = format!(
+        "https://discord.com/api/v10/interactions/{id}/{token}/callback"
+    );
+    let _ = http_request("POST", &url, &body.into_bytes());
+}
+
 impl Guest for PingPlugin {
     fn initialize(_settings: Option<String>) -> Result<(), String> {
+        ensure_command_registered();
         Ok(())
     }
 
@@ -19,33 +78,24 @@ impl Guest for PingPlugin {
         _guild_id: u64,
         _channel_id: u64,
     ) -> Result<(), String> {
-        if event_type != "MESSAGE_CREATE" {
-            return Ok(());
-        }
-
         let Ok(event) = serde_json::from_slice::<serde_json::Value>(&payload) else {
             return Ok(());
         };
 
-        let content = event.get("content").and_then(|v| v.as_str()).unwrap_or("");
-        if content.trim() != "!ping" {
-            return Ok(());
+        match event_type.as_str() {
+            "READY" => {
+                if let Some(id) = event
+                    .get("application")
+                    .and_then(|a| a.get("id"))
+                    .and_then(|v| v.as_str())
+                {
+                    APP_ID.with(|a| *a.borrow_mut() = Some(id.to_string()));
+                    register_ping_command(id);
+                }
+            }
+            "INTERACTION_CREATE" => handle_interaction(&event),
+            _ => {}
         }
-
-        let channel_id = event
-            .get("channel_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if channel_id.is_empty() {
-            return Ok(());
-        }
-
-        let body = serde_json::json!({ "content": "Pong!" }).to_string();
-        let _ = http_request(
-            "POST",
-            &format!("https://discord.com/api/v10/channels/{channel_id}/messages"),
-            &body.into_bytes(),
-        );
 
         Ok(())
     }

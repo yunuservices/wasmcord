@@ -134,6 +134,7 @@ pub struct HostContext {
     table: wasmtime::component::ResourceTable,
     client: reqwest::Client,
     gateway_ping_ms: Arc<AtomicU64>,
+    application_id: Arc<AtomicU64>,
     kv: KvStore,
     workspace: PathBuf,
     config: PluginConfig,
@@ -143,6 +144,7 @@ pub struct HostContext {
 impl HostContext {
     pub fn new(
         gateway_ping_ms: Arc<AtomicU64>,
+        application_id: Arc<AtomicU64>,
         kv: KvStore,
         workspace: PathBuf,
         config: PluginConfig,
@@ -152,6 +154,7 @@ impl HostContext {
             table: wasmtime::component::ResourceTable::default(),
             client: reqwest::Client::new(),
             gateway_ping_ms,
+            application_id,
             kv,
             workspace,
             limiter: PluginResourceLimiter::new(config.limits),
@@ -222,6 +225,11 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
 
     async fn gateway_ping(&mut self) -> u64 {
         self.gateway_ping_ms.load(Ordering::Relaxed)
+    }
+
+    async fn application_id(&mut self) -> Option<String> {
+        let id = self.application_id.load(Ordering::Relaxed);
+        if id == 0 { None } else { Some(id.to_string()) }
     }
 
     async fn now_ms(&mut self) -> u64 {
@@ -295,6 +303,7 @@ pub struct PluginManager {
     plugins: Arc<AsyncMutex<HashMap<String, LoadedPlugin>>>,
     engine: Arc<Engine>,
     gateway_ping_ms: Arc<AtomicU64>,
+    application_id: Arc<AtomicU64>,
     kv: KvStore,
 }
 
@@ -348,12 +357,17 @@ impl PluginManager {
             plugins: Arc::new(AsyncMutex::new(HashMap::new())),
             engine: Arc::new(engine.clone()),
             gateway_ping_ms: Arc::new(AtomicU64::new(0)),
+            application_id: Arc::new(AtomicU64::new(0)),
             kv: KvStore::load_or_default(super::kv::kv_path())?,
         })
     }
 
     pub fn set_gateway_ping_ms(&self, ms: u64) {
         self.gateway_ping_ms.store(ms, Ordering::Relaxed);
+    }
+
+    pub fn set_application_id(&self, id: u64) {
+        self.application_id.store(id, Ordering::Relaxed);
     }
 
     pub async fn load_all(&self) -> Result<()> {
@@ -377,6 +391,7 @@ impl PluginManager {
             match Self::load_one(
                 &self.engine,
                 Arc::clone(&self.gateway_ping_ms),
+                Arc::clone(&self.application_id),
                 self.kv.clone(),
                 wasm_path,
             )
@@ -408,6 +423,7 @@ impl PluginManager {
     pub(crate) async fn load_one(
         engine: &Engine,
         gateway_ping_ms: Arc<AtomicU64>,
+        application_id: Arc<AtomicU64>,
         kv: KvStore,
         wasm_path: &Path,
     ) -> Result<(String, LoadedPlugin)> {
@@ -421,7 +437,13 @@ impl PluginManager {
 
         let mut store = Store::new(
             engine,
-            HostContext::new(gateway_ping_ms, kv.clone(), workspace.clone(), config),
+            HostContext::new(
+                gateway_ping_ms,
+                application_id,
+                kv.clone(),
+                workspace.clone(),
+                config,
+            ),
         );
         configure_store(&mut store)?;
 
@@ -452,6 +474,7 @@ impl PluginManager {
         let (name, loaded) = Self::load_one(
             &self.engine,
             Arc::clone(&self.gateway_ping_ms),
+            Arc::clone(&self.application_id),
             self.kv.clone(),
             wasm_path,
         )
@@ -473,6 +496,7 @@ impl PluginManager {
                 &self.engine,
                 HostContext::new(
                     Arc::clone(&self.gateway_ping_ms),
+                    Arc::clone(&self.application_id),
                     self.kv.clone(),
                     workspace_path(name),
                     config,
@@ -555,6 +579,7 @@ impl PluginManager {
         for (name, component, config) in plugins {
             let engine = Arc::clone(&self.engine);
             let gateway_ping_ms = Arc::clone(&self.gateway_ping_ms);
+            let application_id = Arc::clone(&self.application_id);
             let kv = self.kv.clone();
             let kv_for_save = kv.clone();
             let workspace = workspace_path(&name);
@@ -564,7 +589,7 @@ impl PluginManager {
             let handle = async move {
                 let mut store = Store::new(
                     &engine,
-                    HostContext::new(gateway_ping_ms, kv, workspace, config),
+                    HostContext::new(gateway_ping_ms, application_id, kv, workspace, config),
                 );
                 if let Err(err) = configure_store(&mut store) {
                     tracing::error!("Failed to configure store for {name}: {err}");
@@ -674,6 +699,7 @@ mod tests {
         let engine = crate::wasm::plugin::create_engine()?;
         let (name, _) = PluginManager::load_one(
             &engine,
+            Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             KvStore::with_path(std::env::temp_dir().join("ynsrvcs-test-kv.json")),
             &wasm_path,
