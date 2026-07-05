@@ -535,13 +535,7 @@ impl PluginManager {
             let guard = self.plugins.lock().await;
             guard
                 .iter()
-                .map(|(name, loaded)| {
-                    (
-                        name.clone(),
-                        Arc::clone(&loaded.component),
-                        loaded.config,
-                    )
-                })
+                .map(|(name, loaded)| (name.clone(), Arc::clone(&loaded.component), loaded.config))
                 .collect::<Vec<_>>()
         };
 
