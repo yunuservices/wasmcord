@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -156,7 +156,9 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
             return Err("fs read is not permitted".to_string());
         }
 
-        tokio::fs::read(self.workspace.join(path)).await.map_err(|e| e.to_string())
+        tokio::fs::read(self.workspace.join(path))
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn fs_write(&mut self, path: String, content: Vec<u8>) -> Result<(), String> {
@@ -307,7 +309,8 @@ impl PluginManager {
             HostContext::new(gateway_ping_ms, kv.clone(), workspace.clone(), permissions),
         );
         let linker = create_linker(engine)?;
-        let instance = plugin::PluginWorld::instantiate_async(&mut store, &component, &linker).await?;
+        let instance =
+            plugin::PluginWorld::instantiate_async(&mut store, &component, &linker).await?;
 
         match instance
             .ynsrvcs_plugins_plugin()
@@ -319,10 +322,13 @@ impl PluginManager {
             Err(err) => anyhow::bail!("plugin initialization trapped: {err}"),
         }
 
-        Ok((name, LoadedPlugin {
-            component: Arc::new(component),
-            permissions,
-        }))
+        Ok((
+            name,
+            LoadedPlugin {
+                component: Arc::new(component),
+                permissions,
+            },
+        ))
     }
 
     pub async fn load(&self, wasm_path: &Path) -> Result<String> {
@@ -340,7 +346,9 @@ impl PluginManager {
     pub async fn unload(&self, name: &str) {
         let maybe_loaded = {
             let plugins = self.plugins.lock().await;
-            plugins.get(name).map(|loaded| (Arc::clone(&loaded.component), loaded.permissions))
+            plugins
+                .get(name)
+                .map(|loaded| (Arc::clone(&loaded.component), loaded.permissions))
         };
 
         if let Some((component, permissions)) = maybe_loaded {
@@ -364,7 +372,11 @@ impl PluginManager {
 
             match plugin::PluginWorld::instantiate_async(&mut store, &component, &linker).await {
                 Ok(instance) => {
-                    if let Err(e) = instance.ynsrvcs_plugins_plugin().call_shutdown(&mut store).await {
+                    if let Err(e) = instance
+                        .ynsrvcs_plugins_plugin()
+                        .call_shutdown(&mut store)
+                        .await
+                    {
                         tracing::warn!("Shutdown trap for {name}: {e}");
                     }
                 }
@@ -448,13 +460,16 @@ impl PluginManager {
                     }
                 };
 
-                let instance = match plugin::PluginWorld::instantiate_async(&mut store, &component, &linker).await {
-                    Ok(i) => i,
-                    Err(e) => {
-                        tracing::error!("Failed to instantiate {name} for {event_type}: {e}");
-                        return;
-                    }
-                };
+                let instance =
+                    match plugin::PluginWorld::instantiate_async(&mut store, &component, &linker)
+                        .await
+                    {
+                        Ok(i) => i,
+                        Err(e) => {
+                            tracing::error!("Failed to instantiate {name} for {event_type}: {e}");
+                            return;
+                        }
+                    };
 
                 let guest = instance.ynsrvcs_plugins_plugin();
                 let fut = guest.call_handle_event(
@@ -467,8 +482,12 @@ impl PluginManager {
 
                 match tokio::time::timeout(PLUGIN_CALL_TIMEOUT, fut).await {
                     Ok(Ok(Ok(()))) => {}
-                    Ok(Ok(Err(err))) => tracing::error!("Plugin {name} error handling {event_type}: {err}"),
-                    Ok(Err(err)) => tracing::error!("Plugin {name} trapped handling {event_type}: {err}"),
+                    Ok(Ok(Err(err))) => {
+                        tracing::error!("Plugin {name} error handling {event_type}: {err}")
+                    }
+                    Ok(Err(err)) => {
+                        tracing::error!("Plugin {name} trapped handling {event_type}: {err}")
+                    }
                     Err(_) => tracing::error!("Plugin {name} timed out handling {event_type}"),
                 }
 

@@ -5,13 +5,17 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 1
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+
     steps:
       - uses: actions/checkout@v4
 
@@ -19,19 +23,30 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip2
+          components: clippy, rustfmt
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Build example plugin
+        run: cargo build --target wasm32-wasip2 --manifest-path example-plugin/Cargo.toml --locked
+
+      - name: Stage plugin artifact for tests
+        run: |
+          mkdir -p plugins
+          cp example-plugin/target/wasm32-wasip2/debug/ping_plugin.wasm plugins/ping.wasm
+
+      - name: cargo fmt check
+        run: cargo fmt --check
+
       - name: cargo check (root)
         run: cargo check --locked
+
+      - name: cargo check (tests)
+        run: cargo check --tests --locked
 
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
 
       - name: cargo test
         run: cargo test --locked
-
-      - name: cargo check ping plugin
-        working-directory: ./wasm-plugins/ping
-        run: cargo check --target wasm32-wasip2 --locked

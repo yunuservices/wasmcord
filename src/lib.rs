@@ -30,10 +30,8 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    if shutdown {
-        if let Err(e) = tasks.await {
-            tracing::error!(?e, "Bot loop terminated unexpectedly");
-        }
+    if shutdown && let Err(e) = tasks.await {
+        tracing::error!(?e, "Bot loop terminated unexpectedly");
     }
 
     watch_handle.abort();

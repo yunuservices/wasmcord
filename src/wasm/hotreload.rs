@@ -7,7 +7,10 @@ use notify::{RecursiveMode, Watcher};
 pub async fn watch(manager: PluginManager) {
     let dir = plugin_dir();
     if !dir.exists() {
-        info!("Plugin directory does not exist, hot-reload disabled: {}", dir.display());
+        info!(
+            "Plugin directory does not exist, hot-reload disabled: {}",
+            dir.display()
+        );
         return;
     }
 

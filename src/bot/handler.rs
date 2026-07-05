@@ -4,8 +4,8 @@ use anyhow::Result;
 use tokio::sync::Notify;
 use tokio_stream::StreamExt;
 use twilight_gateway::{CloseFrame, Intents, Message, Shard};
-use twilight_model::gateway::event::GatewayEventDeserializer;
 use twilight_model::gateway::ShardId;
+use twilight_model::gateway::event::GatewayEventDeserializer;
 
 const GATEWAY_BOT_URL: &str = "https://discord.com/api/v10/gateway/bot";
 const HTTP_TIMEOUT_SECONDS: u64 = 15;
@@ -93,7 +93,7 @@ async fn bot_loop(
         let item = tokio::select! {
             biased;
             _ = notify.notified() => {
-                let _ = shard.close(CloseFrame::NORMAL);
+                shard.close(CloseFrame::NORMAL);
                 return Ok(());
             }
             item = shard.next() => item,
