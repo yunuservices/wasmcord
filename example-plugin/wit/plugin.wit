@@ -8,6 +8,9 @@ interface host {
 
     http-request: func(method: string, url: string, body: list<u8>) -> result<response, string>;
     application-id: func() -> option<string>;
+    update-presence: func(status: string, activity-type: u8, activity-name: string) -> result<_, string>;
+    update-voice-state: func(guild-id: u64, channel-id: option<u64>, self-mute: bool, self-deaf: bool) -> result<_, string>;
+    request-guild-members: func(guild-id: u64) -> result<_, string>;
     get-env: func(name: string) -> option<string>;
     gateway-ping: func() -> u64;
     now-ms: func() -> u64;

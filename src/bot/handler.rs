@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::sync::Notify;
 use tokio_stream::StreamExt;
-use twilight_gateway::{CloseFrame, Intents, Message, Shard};
+use twilight_gateway::{CloseFrame, Intents, Message, MessageSender, Shard};
 use twilight_model::gateway::ShardId;
 use twilight_model::gateway::event::GatewayEventDeserializer;
 
@@ -30,6 +30,10 @@ pub async fn connect(
             intents,
         ));
     }
+
+    let senders: Vec<MessageSender> = shards.iter().map(|s| s.sender()).collect();
+    manager.set_shard_senders(senders).await;
+    manager.set_shard_count(shard_count as u64);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let notify = Arc::new(Notify::new());

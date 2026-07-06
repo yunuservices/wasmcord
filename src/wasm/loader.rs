@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8,6 +9,13 @@ use anyhow::Result;
 use serde::Deserialize;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::info;
+use twilight_gateway::MessageSender;
+use twilight_model::gateway::payload::outgoing::{
+    RequestGuildMembers, UpdatePresence, UpdateVoiceState,
+};
+use twilight_model::gateway::presence::{Activity, ActivityType, Status};
+use twilight_model::id::Id;
+use twilight_model::id::marker::{ChannelMarker, GuildMarker};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -135,6 +143,8 @@ pub struct HostContext {
     client: reqwest::Client,
     gateway_ping_ms: Arc<AtomicU64>,
     application_id: Arc<AtomicU64>,
+    shard_senders: Arc<AsyncMutex<Vec<MessageSender>>>,
+    shard_count: Arc<AtomicU64>,
     kv: KvStore,
     workspace: PathBuf,
     config: PluginConfig,
@@ -145,6 +155,8 @@ impl HostContext {
     pub fn new(
         gateway_ping_ms: Arc<AtomicU64>,
         application_id: Arc<AtomicU64>,
+        shard_senders: Arc<AsyncMutex<Vec<MessageSender>>>,
+        shard_count: Arc<AtomicU64>,
         kv: KvStore,
         workspace: PathBuf,
         config: PluginConfig,
@@ -155,6 +167,8 @@ impl HostContext {
             client: reqwest::Client::new(),
             gateway_ping_ms,
             application_id,
+            shard_senders,
+            shard_count,
             kv,
             workspace,
             limiter: PluginResourceLimiter::new(config.limits),
@@ -232,6 +246,103 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
         if id == 0 { None } else { Some(id.to_string()) }
     }
 
+    async fn update_presence(
+        &mut self,
+        status: String,
+        activity_type: u8,
+        activity_name: String,
+    ) -> Result<(), String> {
+        let kind = match activity_type {
+            1 => ActivityType::Streaming,
+            2 => ActivityType::Listening,
+            3 => ActivityType::Watching,
+            4 => ActivityType::Custom,
+            5 => ActivityType::Competing,
+            _ => ActivityType::Playing,
+        };
+        let activity = Activity {
+            application_id: None,
+            assets: None,
+            buttons: Vec::new(),
+            created_at: None,
+            details: None,
+            emoji: None,
+            flags: None,
+            id: None,
+            instance: None,
+            kind,
+            name: activity_name,
+            party: None,
+            secrets: None,
+            state: None,
+            timestamps: None,
+            url: None,
+        };
+        let status = match status.to_lowercase().as_str() {
+            "dnd" | "donotdisturb" => Status::DoNotDisturb,
+            "idle" => Status::Idle,
+            "invisible" => Status::Invisible,
+            "offline" => Status::Offline,
+            _ => Status::Online,
+        };
+        let command = UpdatePresence::new(vec![activity], false, None::<u64>, status)
+            .map_err(|e| e.to_string())?;
+
+        let senders = self.shard_senders.lock().await;
+        if senders.is_empty() {
+            return Err("no shard senders available".to_string());
+        }
+        for sender in senders.iter() {
+            sender.command(&command).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    async fn update_voice_state(
+        &mut self,
+        guild_id: u64,
+        channel_id: Option<u64>,
+        self_mute: bool,
+        self_deaf: bool,
+    ) -> Result<(), String> {
+        let shard_count = self.shard_count.load(Ordering::Relaxed);
+        if shard_count == 0 {
+            return Err("shards not ready".to_string());
+        }
+        let shard_id = ((guild_id >> 22) % shard_count) as usize;
+        let senders = self.shard_senders.lock().await;
+        let sender = senders
+            .get(shard_id)
+            .ok_or_else(|| "shard sender not found".to_string())?;
+
+        let guild_id = NonZeroU64::new(guild_id)
+            .map(|nz| Id::<GuildMarker>::new(nz.get()))
+            .ok_or_else(|| "invalid guild id".to_string())?;
+        let channel_id = channel_id
+            .and_then(NonZeroU64::new)
+            .map(|nz| Id::<ChannelMarker>::new(nz.get()));
+        let command = UpdateVoiceState::new(guild_id, channel_id, self_deaf, self_mute);
+        sender.command(&command).map_err(|e| e.to_string())
+    }
+
+    async fn request_guild_members(&mut self, guild_id: u64) -> Result<(), String> {
+        let shard_count = self.shard_count.load(Ordering::Relaxed);
+        if shard_count == 0 {
+            return Err("shards not ready".to_string());
+        }
+        let shard_id = ((guild_id >> 22) % shard_count) as usize;
+        let senders = self.shard_senders.lock().await;
+        let sender = senders
+            .get(shard_id)
+            .ok_or_else(|| "shard sender not found".to_string())?;
+
+        let guild_id = NonZeroU64::new(guild_id)
+            .map(|nz| Id::<GuildMarker>::new(nz.get()))
+            .ok_or_else(|| "invalid guild id".to_string())?;
+        let command = RequestGuildMembers::builder(guild_id).query("", None);
+        sender.command(&command).map_err(|e| e.to_string())
+    }
+
     async fn now_ms(&mut self) -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -304,6 +415,8 @@ pub struct PluginManager {
     engine: Arc<Engine>,
     gateway_ping_ms: Arc<AtomicU64>,
     application_id: Arc<AtomicU64>,
+    shard_senders: Arc<AsyncMutex<Vec<MessageSender>>>,
+    shard_count: Arc<AtomicU64>,
     kv: KvStore,
 }
 
@@ -358,6 +471,8 @@ impl PluginManager {
             engine: Arc::new(engine.clone()),
             gateway_ping_ms: Arc::new(AtomicU64::new(0)),
             application_id: Arc::new(AtomicU64::new(0)),
+            shard_senders: Arc::new(AsyncMutex::new(Vec::new())),
+            shard_count: Arc::new(AtomicU64::new(0)),
             kv: KvStore::load_or_default(super::kv::kv_path())?,
         })
     }
@@ -368,6 +483,14 @@ impl PluginManager {
 
     pub fn set_application_id(&self, id: u64) {
         self.application_id.store(id, Ordering::Relaxed);
+    }
+
+    pub async fn set_shard_senders(&self, senders: Vec<MessageSender>) {
+        *self.shard_senders.lock().await = senders;
+    }
+
+    pub fn set_shard_count(&self, count: u64) {
+        self.shard_count.store(count, Ordering::Relaxed);
     }
 
     pub async fn load_all(&self) -> Result<()> {
@@ -392,6 +515,8 @@ impl PluginManager {
                 &self.engine,
                 Arc::clone(&self.gateway_ping_ms),
                 Arc::clone(&self.application_id),
+                Arc::clone(&self.shard_senders),
+                Arc::clone(&self.shard_count),
                 self.kv.clone(),
                 wasm_path,
             )
@@ -424,6 +549,8 @@ impl PluginManager {
         engine: &Engine,
         gateway_ping_ms: Arc<AtomicU64>,
         application_id: Arc<AtomicU64>,
+        shard_senders: Arc<AsyncMutex<Vec<MessageSender>>>,
+        shard_count: Arc<AtomicU64>,
         kv: KvStore,
         wasm_path: &Path,
     ) -> Result<(String, LoadedPlugin)> {
@@ -440,6 +567,8 @@ impl PluginManager {
             HostContext::new(
                 gateway_ping_ms,
                 application_id,
+                shard_senders,
+                shard_count,
                 kv.clone(),
                 workspace.clone(),
                 config,
@@ -475,6 +604,8 @@ impl PluginManager {
             &self.engine,
             Arc::clone(&self.gateway_ping_ms),
             Arc::clone(&self.application_id),
+            Arc::clone(&self.shard_senders),
+            Arc::clone(&self.shard_count),
             self.kv.clone(),
             wasm_path,
         )
@@ -497,6 +628,8 @@ impl PluginManager {
                 HostContext::new(
                     Arc::clone(&self.gateway_ping_ms),
                     Arc::clone(&self.application_id),
+                    Arc::clone(&self.shard_senders),
+                    Arc::clone(&self.shard_count),
                     self.kv.clone(),
                     workspace_path(name),
                     config,
@@ -580,6 +713,8 @@ impl PluginManager {
             let engine = Arc::clone(&self.engine);
             let gateway_ping_ms = Arc::clone(&self.gateway_ping_ms);
             let application_id = Arc::clone(&self.application_id);
+            let shard_senders = Arc::clone(&self.shard_senders);
+            let shard_count = Arc::clone(&self.shard_count);
             let kv = self.kv.clone();
             let kv_for_save = kv.clone();
             let workspace = workspace_path(&name);
@@ -589,7 +724,15 @@ impl PluginManager {
             let handle = async move {
                 let mut store = Store::new(
                     &engine,
-                    HostContext::new(gateway_ping_ms, application_id, kv, workspace, config),
+                    HostContext::new(
+                        gateway_ping_ms,
+                        application_id,
+                        shard_senders,
+                        shard_count,
+                        kv,
+                        workspace,
+                        config,
+                    ),
                 );
                 if let Err(err) = configure_store(&mut store) {
                     tracing::error!("Failed to configure store for {name}: {err}");
@@ -700,6 +843,8 @@ mod tests {
         let (name, _) = PluginManager::load_one(
             &engine,
             Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AsyncMutex::new(Vec::new())),
             Arc::new(AtomicU64::new(0)),
             KvStore::with_path(std::env::temp_dir().join("ynsrvcs-test-kv.json")),
             &wasm_path,
