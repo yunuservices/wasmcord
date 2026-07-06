@@ -408,6 +408,21 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
         sender.command(&command).map_err(|e| e.to_string())
     }
 
+    async fn join_voice_channel(
+        &mut self,
+        guild_id: u64,
+        channel_id: u64,
+        self_mute: bool,
+        self_deaf: bool,
+    ) -> Result<(), String> {
+        self.update_voice_state(guild_id, Some(channel_id), self_mute, self_deaf)
+            .await
+    }
+
+    async fn leave_voice_channel(&mut self, guild_id: u64) -> Result<(), String> {
+        self.update_voice_state(guild_id, None, false, false).await
+    }
+
     async fn now_ms(&mut self) -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

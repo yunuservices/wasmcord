@@ -17,7 +17,7 @@ pub async fn connect(
     tokio::task::JoinHandle<Result<()>>,
 )> {
     let token = std::env::var("DISCORD_TOKEN")?;
-    let intents = Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT;
+    let intents = Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT | Intents::GUILD_VOICE_STATES;
 
     let shard_count = fetch_recommended_shard_count(&token).await?;
     tracing::info!(shard_count, "Shard configuration created");
