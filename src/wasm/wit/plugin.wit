@@ -6,7 +6,14 @@ interface host {
         body: list<u8>,
     }
 
+    record attachment {
+        filename: string,
+        content-type: string,
+        data: list<u8>,
+    }
+
     http-request: func(method: string, url: string, body: list<u8>) -> result<response, string>;
+    send-channel-message-with-attachments: func(channel-id: u64, content: string, attachments: list<attachment>) -> result<response, string>;
     application-id: func() -> option<string>;
     update-presence: func(status: string, activity-type: u8, activity-name: string) -> result<_, string>;
     update-voice-state: func(guild-id: u64, channel-id: option<u64>, self-mute: bool, self-deaf: bool) -> result<_, string>;

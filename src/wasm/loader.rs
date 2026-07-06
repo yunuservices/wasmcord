@@ -229,6 +229,71 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
         Ok(plugin::ynsrvcs::plugins::host::Response { status, body })
     }
 
+    async fn send_channel_message_with_attachments(
+        &mut self,
+        channel_id: u64,
+        content: String,
+        attachments: Vec<plugin::ynsrvcs::plugins::host::Attachment>,
+    ) -> Result<plugin::ynsrvcs::plugins::host::Response, String> {
+        if !self.config.permissions.http {
+            return Err("http requests are not permitted".to_string());
+        }
+
+        let token =
+            std::env::var("DISCORD_TOKEN").map_err(|_| "DISCORD_TOKEN not set".to_string())?;
+        let url = format!("https://discord.com/api/v10/channels/{channel_id}/messages");
+
+        let attachment_meta: Vec<serde_json::Value> = attachments
+            .iter()
+            .enumerate()
+            .map(|(idx, a)| {
+                serde_json::json!({
+                    "id": idx.to_string(),
+                    "filename": a.filename,
+                    "description": "",
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "content": content,
+            "attachments": attachment_meta,
+        })
+        .to_string();
+
+        let mut form = reqwest::multipart::Form::new().text("payload_json", payload);
+        for (idx, attachment) in attachments.into_iter().enumerate() {
+            let part = reqwest::multipart::Part::bytes(attachment.data)
+                .file_name(attachment.filename)
+                .mime_str(&attachment.content_type)
+                .map_err(|e| e.to_string())?;
+            form = form.part(format!("files[{idx}]"), part);
+        }
+
+        let req = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bot {token}"))
+            .multipart(form)
+            .build()
+            .map_err(|e| e.to_string())?;
+
+        let resp = tokio::time::timeout(HTTP_TIMEOUT, self.client.execute(req))
+            .await
+            .map_err(|_| "http request timed out".to_string())?
+            .map_err(|e| e.to_string())?;
+
+        let status = resp.status().as_u16();
+        let body = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
+        if status >= 400 {
+            let text = String::from_utf8_lossy(&body);
+            tracing::warn!(
+                "send_channel_message_with_attachments returned {status} for {url}: {text}"
+            );
+        }
+
+        Ok(plugin::ynsrvcs::plugins::host::Response { status, body })
+    }
+
     async fn get_env(&mut self, name: String) -> Option<String> {
         if !self.config.permissions.env {
             return None;
