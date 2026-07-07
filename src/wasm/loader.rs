@@ -469,6 +469,83 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
         Ok(())
     }
 
+    async fn pause_audio(&mut self, guild_id: u64) -> Result<(), String> {
+        let guild_id = NonZeroU64::new(guild_id)
+            .map(|nz| Id::<GuildMarker>::new(nz.get()))
+            .ok_or_else(|| "invalid guild id".to_string())?;
+
+        let songbird_guard = self.songbird.lock().await;
+        let songbird = songbird_guard
+            .as_ref()
+            .ok_or_else(|| "voice driver not ready".to_string())?;
+
+        let call = songbird
+            .get(guild_id)
+            .ok_or_else(|| "bot is not in a voice channel".to_string())?;
+        let call = call.lock().await;
+
+        call.queue().pause().map_err(|e| e.to_string())
+    }
+
+    async fn resume_audio(&mut self, guild_id: u64) -> Result<(), String> {
+        let guild_id = NonZeroU64::new(guild_id)
+            .map(|nz| Id::<GuildMarker>::new(nz.get()))
+            .ok_or_else(|| "invalid guild id".to_string())?;
+
+        let songbird_guard = self.songbird.lock().await;
+        let songbird = songbird_guard
+            .as_ref()
+            .ok_or_else(|| "voice driver not ready".to_string())?;
+
+        let call = songbird
+            .get(guild_id)
+            .ok_or_else(|| "bot is not in a voice channel".to_string())?;
+        let call = call.lock().await;
+
+        call.queue().resume().map_err(|e| e.to_string())
+    }
+
+    async fn skip_audio(&mut self, guild_id: u64) -> Result<(), String> {
+        let guild_id = NonZeroU64::new(guild_id)
+            .map(|nz| Id::<GuildMarker>::new(nz.get()))
+            .ok_or_else(|| "invalid guild id".to_string())?;
+
+        let songbird_guard = self.songbird.lock().await;
+        let songbird = songbird_guard
+            .as_ref()
+            .ok_or_else(|| "voice driver not ready".to_string())?;
+
+        let call = songbird
+            .get(guild_id)
+            .ok_or_else(|| "bot is not in a voice channel".to_string())?;
+        let call = call.lock().await;
+
+        call.queue().skip().map_err(|e| e.to_string())
+    }
+
+    async fn set_volume(&mut self, guild_id: u64, volume: f32) -> Result<(), String> {
+        let guild_id = NonZeroU64::new(guild_id)
+            .map(|nz| Id::<GuildMarker>::new(nz.get()))
+            .ok_or_else(|| "invalid guild id".to_string())?;
+
+        let songbird_guard = self.songbird.lock().await;
+        let songbird = songbird_guard
+            .as_ref()
+            .ok_or_else(|| "voice driver not ready".to_string())?;
+
+        let call = songbird
+            .get(guild_id)
+            .ok_or_else(|| "bot is not in a voice channel".to_string())?;
+        let call = call.lock().await;
+
+        let handle = call
+            .queue()
+            .current()
+            .ok_or_else(|| "no active track".to_string())?;
+
+        handle.set_volume(volume).map_err(|e| e.to_string())
+    }
+
     async fn now_ms(&mut self) -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
