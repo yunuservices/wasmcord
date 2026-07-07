@@ -121,6 +121,10 @@ pub(crate) struct PluginManifest {
     pub dependencies: HashMap<String, DependencySpec>,
     #[serde(default)]
     pub provides: Vec<String>,
+    #[serde(flatten)]
+    pub permissions: PluginPermissions,
+    #[serde(default)]
+    pub limits: PluginLimits,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1066,25 +1070,6 @@ fn workspace_path(name: &str) -> PathBuf {
     plugin_dir().join(name).join("workspace")
 }
 
-async fn load_plugin_config(wasm_path: &Path) -> PluginConfig {
-    let config_path = wasm_path.with_extension("json");
-
-    if !config_path.exists() {
-        return PluginConfig::default();
-    }
-
-    match tokio::fs::read_to_string(&config_path).await {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
-        Err(err) => {
-            tracing::warn!(
-                "Failed to read plugin config at {}: {err}",
-                config_path.display()
-            );
-            PluginConfig::default()
-        }
-    }
-}
-
 async fn load_manifest(wasm_path: &Path) -> PluginManifest {
     let manifest_path = wasm_path.with_extension("toml");
 
@@ -1343,7 +1328,10 @@ impl PluginManager {
 
         let component = Component::new(engine, &bytes)?;
         let workspace = workspace_path(&name);
-        let config = load_plugin_config(wasm_path).await;
+        let config = PluginConfig {
+            permissions: manifest.permissions,
+            limits: manifest.limits,
+        };
         tokio::fs::create_dir_all(&workspace).await?;
 
         let version = manifest.plugin.version.clone();
