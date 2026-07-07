@@ -3,3 +3,6 @@ name = "ping"
 version = "0.1.0"
 description = "Example ping/slash command plugin"
 abi_version = 1
+
+[permissions]
+http = true
