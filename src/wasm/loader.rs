@@ -1,11 +1,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroU64;
+
+use semver::{Version, VersionReq};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use songbird::Songbird;
 use tokio::sync::Mutex as AsyncMutex;
@@ -86,6 +88,46 @@ pub struct PluginConfig {
     pub permissions: PluginPermissions,
     #[serde(default)]
     pub limits: PluginLimits,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[allow(dead_code)]
+pub(crate) struct ManifestPluginInfo {
+    pub name: Option<String>,
+    #[serde(default = "default_manifest_version")]
+    pub version: Version,
+    pub description: Option<String>,
+}
+
+impl Default for ManifestPluginInfo {
+    fn default() -> Self {
+        Self {
+            name: None,
+            version: default_manifest_version(),
+            description: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct PluginManifest {
+    #[serde(default)]
+    pub plugin: ManifestPluginInfo,
+    #[serde(default)]
+    pub dependencies: HashMap<String, DependencySpec>,
+    #[serde(default)]
+    pub provides: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct DependencySpec {
+    pub version: String,
+    #[serde(default)]
+    pub optional: bool,
+}
+
+fn default_manifest_version() -> Version {
+    Version::new(0, 0, 0)
 }
 
 pub struct PluginResourceLimiter {
@@ -862,9 +904,12 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) struct LoadedPlugin {
     component: Arc<Component>,
     config: PluginConfig,
+    version: Version,
+    provides: Vec<String>,
 }
 
 const PLUGIN_FAILURE_THRESHOLD: u32 = 5;
@@ -909,6 +954,31 @@ async fn load_plugin_config(wasm_path: &Path) -> PluginConfig {
                 config_path.display()
             );
             PluginConfig::default()
+        }
+    }
+}
+
+async fn load_manifest(wasm_path: &Path) -> PluginManifest {
+    let manifest_path = wasm_path.with_extension("toml");
+
+    if !manifest_path.exists() {
+        return PluginManifest::default();
+    }
+
+    match tokio::fs::read_to_string(&manifest_path).await {
+        Ok(text) => toml::from_str(&text).unwrap_or_else(|err| {
+            tracing::warn!(
+                "Failed to parse plugin manifest at {}: {err}",
+                manifest_path.display()
+            );
+            PluginManifest::default()
+        }),
+        Err(err) => {
+            tracing::warn!(
+                "Failed to read plugin manifest at {}: {err}",
+                manifest_path.display()
+            );
+            PluginManifest::default()
         }
     }
 }
@@ -982,17 +1052,31 @@ impl PluginManager {
             info!("Created plugin directory: {}", path.display());
         }
 
-        let mut entries = Vec::new();
+        let mut pending: HashMap<String, (PathBuf, PluginManifest)> = HashMap::new();
         let mut read = tokio::fs::read_dir(&path).await?;
         while let Some(entry) = read.next_entry().await? {
-            let p = entry.path();
-            if p.extension().is_some_and(|e| e == "wasm") {
-                entries.push(p);
+            let wasm_path = entry.path();
+            if wasm_path.extension().is_some_and(|e| e == "wasm") {
+                let manifest = load_manifest(&wasm_path).await;
+                let name = manifest
+                    .plugin
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| Self::plugin_name(&wasm_path));
+                pending.insert(name, (wasm_path, manifest));
             }
         }
 
-        let mut loaded_plugins = Vec::new();
-        for wasm_path in &entries {
+        if let Err(e) = Self::validate_dependencies(&pending) {
+            tracing::error!("Plugin dependency validation failed: {e}");
+            anyhow::bail!(e);
+        }
+
+        let order = Self::resolve_load_order(&pending)?;
+
+        let mut loaded_count = 0;
+        for name in order {
+            let (wasm_path, manifest) = pending.remove(&name).expect("pending plugin missing");
             match Self::load_one(
                 &self.engine,
                 Arc::clone(&self.gateway_ping_ms),
@@ -1003,24 +1087,95 @@ impl PluginManager {
                 Arc::clone(&self.bus_subscriptions),
                 Arc::clone(&self.bus_queue),
                 self.kv.clone(),
-                wasm_path,
+                &wasm_path,
+                &manifest,
             )
             .await
             {
-                Ok((name, loaded)) => loaded_plugins.push((name, loaded)),
-                Err(e) => {
-                    tracing::error!("Failed to load {}: {e}", wasm_path.display());
+                Ok((loaded_name, loaded)) => {
+                    self.plugins.lock().await.insert(loaded_name, loaded);
+                    loaded_count += 1;
+                }
+                Err(e) => tracing::error!("Failed to load {}: {e}", wasm_path.display()),
+            }
+        }
+
+        info!(count = loaded_count, "Plugins loaded");
+        Ok(())
+    }
+
+    fn validate_dependencies(pending: &HashMap<String, (PathBuf, PluginManifest)>) -> Result<()> {
+        for (name, (_, manifest)) in pending {
+            for (dep_name, spec) in &manifest.dependencies {
+                match pending.get(dep_name) {
+                    Some((_, dep_manifest)) => {
+                        let req = VersionReq::parse(&spec.version).with_context(|| {
+                            format!("invalid version requirement for {dep_name} in {name}")
+                        })?;
+                        if !req.matches(&dep_manifest.plugin.version) {
+                            anyhow::bail!(
+                                "plugin {name} requires {dep_name} {req}, but found {}",
+                                dep_manifest.plugin.version
+                            );
+                        }
+                    }
+                    None => {
+                        if spec.optional {
+                            tracing::warn!(
+                                "Plugin {name} optional dependency {dep_name} is not present"
+                            );
+                        } else {
+                            anyhow::bail!("plugin {name} requires missing dependency {dep_name}");
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_load_order(
+        pending: &HashMap<String, (PathBuf, PluginManifest)>,
+    ) -> Result<Vec<String>> {
+        let mut in_degree: HashMap<String, usize> =
+            pending.keys().map(|k| (k.clone(), 0)).collect();
+        let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
+
+        for (name, (_, manifest)) in pending {
+            for dep_name in manifest.dependencies.keys() {
+                if pending.contains_key(dep_name) {
+                    dependents
+                        .entry(dep_name.clone())
+                        .or_default()
+                        .push(name.clone());
+                    *in_degree.get_mut(name).unwrap() += 1;
                 }
             }
         }
 
-        let mut plugins = self.plugins.lock().await;
-        for (name, loaded) in loaded_plugins {
-            plugins.insert(name, loaded);
+        let mut queue: VecDeque<String> = in_degree
+            .iter()
+            .filter(|(_, degree)| **degree == 0)
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut order = Vec::new();
+
+        while let Some(name) = queue.pop_front() {
+            order.push(name.clone());
+            for dependent in dependents.get(&name).cloned().unwrap_or_default() {
+                let degree = in_degree.get_mut(&dependent).unwrap();
+                *degree -= 1;
+                if *degree == 0 {
+                    queue.push_back(dependent);
+                }
+            }
         }
 
-        info!(count = plugins.len(), "Plugins loaded");
-        Ok(())
+        if order.len() != pending.len() {
+            anyhow::bail!("circular plugin dependency detected");
+        }
+
+        Ok(order)
     }
 
     pub fn plugin_name(path: &Path) -> String {
@@ -1042,14 +1197,22 @@ impl PluginManager {
         bus_queue: Arc<AsyncMutex<HashMap<String, VecDeque<BusMessage>>>>,
         kv: KvStore,
         wasm_path: &Path,
+        manifest: &PluginManifest,
     ) -> Result<(String, LoadedPlugin)> {
         let bytes = tokio::fs::read(wasm_path).await?;
-        let name = Self::plugin_name(wasm_path);
+        let name = manifest
+            .plugin
+            .name
+            .clone()
+            .unwrap_or_else(|| Self::plugin_name(wasm_path));
 
         let component = Component::new(engine, &bytes)?;
         let workspace = workspace_path(&name);
         let config = load_plugin_config(wasm_path).await;
         tokio::fs::create_dir_all(&workspace).await?;
+
+        let version = manifest.plugin.version.clone();
+        let provides = manifest.provides.clone();
 
         let mut store = Store::new(
             engine,
@@ -1088,11 +1251,14 @@ impl PluginManager {
             LoadedPlugin {
                 component: Arc::new(component),
                 config,
+                version,
+                provides,
             },
         ))
     }
 
     pub async fn load(&self, wasm_path: &Path) -> Result<String> {
+        let manifest = load_manifest(wasm_path).await;
         let (name, loaded) = Self::load_one(
             &self.engine,
             Arc::clone(&self.gateway_ping_ms),
@@ -1104,6 +1270,7 @@ impl PluginManager {
             Arc::clone(&self.bus_queue),
             self.kv.clone(),
             wasm_path,
+            &manifest,
         )
         .await?;
         self.plugins.lock().await.insert(name.clone(), loaded);
@@ -1114,7 +1281,12 @@ impl PluginManager {
     /// old version. If the new version fails to load, the old plugin stays in
     /// service.
     pub async fn reload_plugin(&self, wasm_path: &Path) -> Result<String> {
-        let name = Self::plugin_name(wasm_path);
+        let manifest = load_manifest(wasm_path).await;
+        let name = manifest
+            .plugin
+            .name
+            .clone()
+            .unwrap_or_else(|| Self::plugin_name(wasm_path));
         let (loaded_name, loaded) = Self::load_one(
             &self.engine,
             Arc::clone(&self.gateway_ping_ms),
@@ -1126,6 +1298,7 @@ impl PluginManager {
             Arc::clone(&self.bus_queue),
             self.kv.clone(),
             wasm_path,
+            &manifest,
         )
         .await?;
 
@@ -1492,6 +1665,7 @@ mod tests {
 
         let wasm_path = ensure_ping_wasm()?;
         let engine = crate::wasm::plugin::create_engine()?;
+        let manifest = PluginManifest::default();
         let (name, _) = PluginManager::load_one(
             &engine,
             Arc::new(AtomicU64::new(0)),
@@ -1503,6 +1677,7 @@ mod tests {
             Arc::new(AsyncMutex::new(HashMap::new())),
             KvStore::with_path(std::env::temp_dir().join("ynsrvcs-test-kv.json")),
             &wasm_path,
+            &manifest,
         )
         .await?;
         assert_eq!(name, "ping");

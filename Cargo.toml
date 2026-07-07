@@ -19,6 +19,8 @@ wasmtime-wasi = "46"
 notify = "8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
 songbird = { version = "0.6", default-features = false, features = ["twilight", "gateway", "driver", "rustls", "tws", "builtin-queue"] }
+semver = "1"
+toml = "0.8"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.7"
