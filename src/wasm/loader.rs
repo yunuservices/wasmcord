@@ -947,7 +947,13 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
             return None;
         }
 
-        self.kv.get(&scope, &key)
+        match self.kv.get(&scope, &key).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("kv_get failed for {scope}/{key}: {e}");
+                None
+            }
+        }
     }
 
     async fn kv_set(&mut self, scope: String, key: String, value: Vec<u8>) {
@@ -955,7 +961,9 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
             return;
         }
 
-        self.kv.set(scope, key, value);
+        if let Err(e) = self.kv.set(scope, key, value).await {
+            tracing::error!("kv_set failed: {e}");
+        }
     }
 
     async fn fs_read(&mut self, path: String) -> Result<Vec<u8>, String> {
@@ -1130,7 +1138,7 @@ impl PluginManager {
             plugin_failures: Arc::new(AsyncMutex::new(HashMap::new())),
             bus_subscriptions: Arc::new(AsyncMutex::new(HashMap::new())),
             bus_queue: Arc::new(AsyncMutex::new(HashMap::new())),
-            kv: KvStore::load_or_default(super::kv::kv_path())?,
+            kv: KvStore::with_path(super::kv::kv_path())?,
         })
     }
 
@@ -1514,8 +1522,8 @@ impl PluginManager {
         }
     }
 
-    pub fn save_kv(&self) -> Result<()> {
-        self.kv.save()
+    pub async fn save_kv(&self) -> Result<()> {
+        self.kv.save().await
     }
 
     pub async fn unload_by_path(&self, wasm_path: &Path) {
@@ -1643,7 +1651,7 @@ impl PluginManager {
                     }
                 }
 
-                if let Err(err) = kv_for_save.save() {
+                if let Err(err) = kv_for_save.save().await {
                     tracing::error!("Failed to persist KV after {event_type} for {name}: {err}");
                 }
             };
@@ -1802,7 +1810,7 @@ mod tests {
             Arc::new(AsyncMutex::new(None)),
             Arc::new(AsyncMutex::new(HashMap::new())),
             Arc::new(AsyncMutex::new(HashMap::new())),
-            KvStore::with_path(std::env::temp_dir().join("ynsrvcs-test-kv.json")),
+            KvStore::with_path(std::env::temp_dir().join("ynsrvcs-test-kv"))?,
             &wasm_path,
             &manifest,
         )
