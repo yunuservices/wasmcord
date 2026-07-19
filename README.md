@@ -1,4 +1,4 @@
-# ynsrvcs
+# wasmcord
 
 WASM-based Discord bot framework. Plugins run as isolated WebAssembly components and can be hot-reloaded while the bot is running.
 
@@ -7,7 +7,7 @@ WASM-based Discord bot framework. Plugins run as isolated WebAssembly components
 - WASM plugin runtime with per-plugin CPU/memory limits and permissions
 - Discord gateway event dispatch + outbound commands
 - REST helpers: HTTP, attachments, components, interactions, modals
-- Voice support via Songbird (join, play URL, stop/pause/skip/volume)
+- Voice support via Songbird
 - Inter-plugin event bus
 - Hot reload and watchdog (auto-unload failing plugins)
 - Plugin manifests with dependencies and semver resolution
