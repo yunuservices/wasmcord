@@ -30,6 +30,8 @@ interface host {
     skip-audio: func(guild-id: u64) -> result<_, string>;
     set-volume: func(guild-id: u64, volume: f32) -> result<_, string>;
     request-guild-members: func(guild-id: u64) -> result<_, string>;
+    schedule-task: func(name: string, interval-ms: u64) -> result<_, string>;
+    cancel-task: func(name: string) -> result<_, string>;
     get-env: func(name: string) -> option<string>;
     gateway-ping: func() -> u64;
     now-ms: func() -> u64;

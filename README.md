@@ -65,7 +65,7 @@ http = true
 - `send-channel-message-with-attachments`
 - `send-channel-message-with-components`
 - `reply-to-interaction`, `edit-interaction-message`, `show-modal`
-- `application-id`, `update-presence`, `request-guild-members`
+- `application-id`, `update-presence`, `request-guild-members`, `schedule-task`, `cancel-task`
 - `join-voice-channel`, `leave-voice-channel`, `play-audio-url`, `stop-audio`, `pause-audio`, `resume-audio`, `skip-audio`, `set-volume`
 - `bus-publish`, `bus-subscribe`
 - `kv-get`, `kv-set`, `fs-read`, `fs-write`, `get-env`, `log`

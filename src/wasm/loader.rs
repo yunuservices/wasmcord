@@ -42,6 +42,8 @@ pub struct PluginPermissions {
     pub kv: bool,
     #[serde(default)]
     pub bus: bool,
+    #[serde(default)]
+    pub schedule: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -243,6 +245,19 @@ impl DiscordRateLimiter {
 
 static GLOBAL_DISCORD_RATE_LIMITER: OnceLock<DiscordRateLimiter> = OnceLock::new();
 
+#[derive(Clone, Debug)]
+enum ScheduleCmd {
+    Register {
+        plugin: String,
+        name: String,
+        interval_ms: u64,
+    },
+    Unregister {
+        plugin: String,
+        name: String,
+    },
+}
+
 fn is_discord_api_url(url: &str) -> bool {
     url.starts_with("https://discord.com/api/")
         || url.starts_with("https://canary.discord.com/api/")
@@ -260,6 +275,7 @@ pub struct HostContext {
     songbird: Arc<AsyncMutex<Option<Songbird>>>,
     bus_subscriptions: Arc<AsyncMutex<HashMap<String, HashSet<String>>>>,
     bus_queue: Arc<AsyncMutex<HashMap<String, VecDeque<BusMessage>>>>,
+    schedule_tx: tokio::sync::mpsc::UnboundedSender<ScheduleCmd>,
     plugin_name: String,
     kv: KvStore,
     workspace: PathBuf,
@@ -277,6 +293,7 @@ impl HostContext {
         songbird: Arc<AsyncMutex<Option<Songbird>>>,
         bus_subscriptions: Arc<AsyncMutex<HashMap<String, HashSet<String>>>>,
         bus_queue: Arc<AsyncMutex<HashMap<String, VecDeque<BusMessage>>>>,
+        schedule_tx: tokio::sync::mpsc::UnboundedSender<ScheduleCmd>,
         plugin_name: String,
         kv: KvStore,
         workspace: PathBuf,
@@ -295,6 +312,7 @@ impl HostContext {
             songbird,
             bus_subscriptions,
             bus_queue,
+            schedule_tx,
             plugin_name,
             kv,
             workspace,
@@ -694,6 +712,37 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
         self.gateway_ping_ms.load(Ordering::Relaxed)
     }
 
+    async fn schedule_task(&mut self, name: String, interval_ms: u64) -> Result<(), String> {
+        if !self.config.permissions.schedule {
+            return Err("schedule tasks are not permitted".to_string());
+        }
+
+        if interval_ms == 0 {
+            return Err("interval must be greater than 0".to_string());
+        }
+
+        self.schedule_tx
+            .send(ScheduleCmd::Register {
+                plugin: self.plugin_name.clone(),
+                name,
+                interval_ms,
+            })
+            .map_err(|_| "schedule worker dropped".to_string())
+    }
+
+    async fn cancel_task(&mut self, name: String) -> Result<(), String> {
+        if !self.config.permissions.schedule {
+            return Err("schedule tasks are not permitted".to_string());
+        }
+
+        self.schedule_tx
+            .send(ScheduleCmd::Unregister {
+                plugin: self.plugin_name.clone(),
+                name,
+            })
+            .map_err(|_| "schedule worker dropped".to_string())
+    }
+
     async fn application_id(&mut self) -> Option<String> {
         let id = self.application_id.load(Ordering::Relaxed);
         if id == 0 { None } else { Some(id.to_string()) }
@@ -1057,6 +1106,8 @@ pub struct PluginManager {
     plugin_failures: Arc<AsyncMutex<HashMap<String, u32>>>,
     bus_subscriptions: Arc<AsyncMutex<HashMap<String, HashSet<String>>>>,
     bus_queue: Arc<AsyncMutex<HashMap<String, VecDeque<BusMessage>>>>,
+    schedules: Arc<AsyncMutex<HashMap<(String, String), tokio::task::JoinHandle<()>>>>,
+    schedule_tx: tokio::sync::mpsc::UnboundedSender<ScheduleCmd>,
     kv: KvStore,
 }
 
@@ -1112,7 +1163,8 @@ fn create_linker(engine: &Engine) -> Result<Linker<HostContext>> {
 
 impl PluginManager {
     pub fn new(engine: &Engine) -> Result<Self> {
-        Ok(Self {
+        let (schedule_tx, mut schedule_rx) = tokio::sync::mpsc::unbounded_channel();
+        let manager = Self {
             plugins: Arc::new(AsyncMutex::new(HashMap::new())),
             engine: Arc::new(engine.clone()),
             gateway_ping_ms: Arc::new(AtomicU64::new(0)),
@@ -1123,8 +1175,54 @@ impl PluginManager {
             plugin_failures: Arc::new(AsyncMutex::new(HashMap::new())),
             bus_subscriptions: Arc::new(AsyncMutex::new(HashMap::new())),
             bus_queue: Arc::new(AsyncMutex::new(HashMap::new())),
+            schedules: Arc::new(AsyncMutex::new(HashMap::new())),
+            schedule_tx,
             kv: KvStore::with_path(super::kv::kv_path())?,
-        })
+        };
+
+        let manager_for_worker = manager.clone();
+        tokio::spawn(async move {
+            while let Some(cmd) = schedule_rx.recv().await {
+                match cmd {
+                    ScheduleCmd::Register {
+                        plugin,
+                        name,
+                        interval_ms,
+                    } => {
+                        let manager = manager_for_worker.clone();
+                        let handle = tokio::spawn(async move {
+                            let mut interval =
+                                tokio::time::interval(Duration::from_millis(interval_ms));
+                            interval
+                                .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                            loop {
+                                interval.tick().await;
+                                let payload =
+                                    serde_json::json!({ "name": name }).to_string().into_bytes();
+                                manager.dispatch_event("SCHEDULE", payload, 0, 0).await;
+                            }
+                        });
+                        manager_for_worker
+                            .schedules
+                            .lock()
+                            .await
+                            .insert((plugin, name), handle);
+                    }
+                    ScheduleCmd::Unregister { plugin, name } => {
+                        if let Some(handle) = manager_for_worker
+                            .schedules
+                            .lock()
+                            .await
+                            .remove(&(plugin, name))
+                        {
+                            handle.abort();
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(manager)
     }
 
     pub fn set_gateway_ping_ms(&self, ms: u64) {
@@ -1198,6 +1296,7 @@ impl PluginManager {
                 Arc::clone(&self.songbird),
                 Arc::clone(&self.bus_subscriptions),
                 Arc::clone(&self.bus_queue),
+                self.schedule_tx.clone(),
                 self.kv.clone(),
                 &wasm_path,
                 &manifest,
@@ -1307,6 +1406,7 @@ impl PluginManager {
         songbird: Arc<AsyncMutex<Option<Songbird>>>,
         bus_subscriptions: Arc<AsyncMutex<HashMap<String, HashSet<String>>>>,
         bus_queue: Arc<AsyncMutex<HashMap<String, VecDeque<BusMessage>>>>,
+        schedule_tx: tokio::sync::mpsc::UnboundedSender<ScheduleCmd>,
         kv: KvStore,
         wasm_path: &Path,
         manifest: &PluginManifest,
@@ -1347,6 +1447,7 @@ impl PluginManager {
                 songbird,
                 bus_subscriptions,
                 bus_queue,
+                schedule_tx,
                 name.clone(),
                 kv.clone(),
                 workspace.clone(),
@@ -1391,6 +1492,7 @@ impl PluginManager {
             Arc::clone(&self.songbird),
             Arc::clone(&self.bus_subscriptions),
             Arc::clone(&self.bus_queue),
+            self.schedule_tx.clone(),
             self.kv.clone(),
             wasm_path,
             &manifest,
@@ -1419,6 +1521,7 @@ impl PluginManager {
             Arc::clone(&self.songbird),
             Arc::clone(&self.bus_subscriptions),
             Arc::clone(&self.bus_queue),
+            self.schedule_tx.clone(),
             self.kv.clone(),
             wasm_path,
             &manifest,
@@ -1444,6 +1547,8 @@ impl PluginManager {
     }
 
     pub async fn unload(&self, name: &str) {
+        self.cancel_all_schedules(name).await;
+
         let maybe_loaded = {
             let plugins = self.plugins.lock().await;
             plugins
@@ -1462,6 +1567,7 @@ impl PluginManager {
                     Arc::clone(&self.songbird),
                     Arc::clone(&self.bus_subscriptions),
                     Arc::clone(&self.bus_queue),
+                    self.schedule_tx.clone(),
                     name.to_string(),
                     self.kv.clone(),
                     workspace_path(name),
@@ -1523,6 +1629,20 @@ impl PluginManager {
         self.plugins.lock().await.contains_key(name)
     }
 
+    async fn cancel_all_schedules(&self, plugin_name: &str) {
+        let mut schedules = self.schedules.lock().await;
+        let keys: Vec<(String, String)> = schedules
+            .keys()
+            .filter(|(plugin, _)| plugin == plugin_name)
+            .cloned()
+            .collect();
+        for key in keys {
+            if let Some(handle) = schedules.remove(&key) {
+                handle.abort();
+            }
+        }
+    }
+
     pub async fn loaded_names(&self) -> Vec<String> {
         self.plugins.lock().await.keys().cloned().collect()
     }
@@ -1571,6 +1691,7 @@ impl PluginManager {
                         songbird,
                         Arc::clone(&manager.bus_subscriptions),
                         Arc::clone(&manager.bus_queue),
+                        manager.schedule_tx.clone(),
                         name.clone(),
                         kv,
                         workspace,
@@ -1696,6 +1817,7 @@ impl PluginManager {
                     songbird,
                     bus_subscriptions,
                     bus_queue,
+                    self.schedule_tx.clone(),
                     name.clone(),
                     kv,
                     workspace,
@@ -1798,6 +1920,7 @@ mod tests {
             Arc::new(AsyncMutex::new(None)),
             Arc::new(AsyncMutex::new(HashMap::new())),
             Arc::new(AsyncMutex::new(HashMap::new())),
+            tokio::sync::mpsc::unbounded_channel().0,
             KvStore::with_path(std::env::temp_dir().join("ynsrvcs-test-kv"))?,
             &wasm_path,
             &manifest,
