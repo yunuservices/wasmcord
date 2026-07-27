@@ -1198,8 +1198,9 @@ impl PluginManager {
                                 .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                             loop {
                                 interval.tick().await;
-                                let payload =
-                                    serde_json::json!({ "name": task_name }).to_string().into_bytes();
+                                let payload = serde_json::json!({ "name": task_name })
+                                    .to_string()
+                                    .into_bytes();
                                 manager.dispatch_event("SCHEDULE", payload, 0, 0).await;
                             }
                         });
