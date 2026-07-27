@@ -246,7 +246,7 @@ impl DiscordRateLimiter {
 static GLOBAL_DISCORD_RATE_LIMITER: OnceLock<DiscordRateLimiter> = OnceLock::new();
 
 #[derive(Clone, Debug)]
-enum ScheduleCmd {
+pub(crate) enum ScheduleCmd {
     Register {
         plugin: String,
         name: String,
@@ -1190,6 +1190,7 @@ impl PluginManager {
                         interval_ms,
                     } => {
                         let manager = manager_for_worker.clone();
+                        let task_name = name.clone();
                         let handle = tokio::spawn(async move {
                             let mut interval =
                                 tokio::time::interval(Duration::from_millis(interval_ms));
@@ -1198,7 +1199,7 @@ impl PluginManager {
                             loop {
                                 interval.tick().await;
                                 let payload =
-                                    serde_json::json!({ "name": name }).to_string().into_bytes();
+                                    serde_json::json!({ "name": task_name }).to_string().into_bytes();
                                 manager.dispatch_event("SCHEDULE", payload, 0, 0).await;
                             }
                         });
