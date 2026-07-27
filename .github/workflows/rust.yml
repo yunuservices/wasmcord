@@ -9,12 +9,27 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_BUILD_JOBS: 1
 
 jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: cargo fmt check
+        run: cargo fmt --check
+
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: fmt
 
     steps:
       - uses: actions/checkout@v4
@@ -36,17 +51,63 @@ jobs:
           mkdir -p plugins
           cp example-plugin/target/wasm32-wasip2/debug/ping_plugin.wasm plugins/ping.wasm
 
-      - name: cargo fmt check
-        run: cargo fmt --check
-
       - name: cargo check (root)
         run: cargo check --locked
 
       - name: cargo check (tests)
         run: cargo check --tests --locked
 
+  clippy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: fmt
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build example plugin
+        run: cargo build --target wasm32-wasip2 --manifest-path example-plugin/Cargo.toml --locked
+
+      - name: Stage plugin artifact for tests
+        run: |
+          mkdir -p plugins
+          cp example-plugin/target/wasm32-wasip2/debug/ping_plugin.wasm plugins/ping.wasm
+
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [check, clippy]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build example plugin
+        run: cargo build --target wasm32-wasip2 --manifest-path example-plugin/Cargo.toml --locked
+
+      - name: Stage plugin artifact for tests
+        run: |
+          mkdir -p plugins
+          cp example-plugin/target/wasm32-wasip2/debug/ping_plugin.wasm plugins/ping.wasm
 
       - name: cargo test
         run: cargo test --locked
