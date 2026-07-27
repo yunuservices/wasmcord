@@ -1094,6 +1094,8 @@ pub(crate) struct LoadedPlugin {
 
 const PLUGIN_FAILURE_THRESHOLD: u32 = 5;
 
+type ScheduleMap = Arc<AsyncMutex<HashMap<(String, String), tokio::task::JoinHandle<()>>>>;
+
 #[derive(Clone)]
 pub struct PluginManager {
     plugins: Arc<AsyncMutex<HashMap<String, LoadedPlugin>>>,
@@ -1106,7 +1108,7 @@ pub struct PluginManager {
     plugin_failures: Arc<AsyncMutex<HashMap<String, u32>>>,
     bus_subscriptions: Arc<AsyncMutex<HashMap<String, HashSet<String>>>>,
     bus_queue: Arc<AsyncMutex<HashMap<String, VecDeque<BusMessage>>>>,
-    schedules: Arc<AsyncMutex<HashMap<(String, String), tokio::task::JoinHandle<()>>>>,
+    schedules: ScheduleMap,
     schedule_tx: tokio::sync::mpsc::UnboundedSender<ScheduleCmd>,
     kv: KvStore,
 }
