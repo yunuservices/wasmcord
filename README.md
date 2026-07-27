@@ -23,8 +23,8 @@ WASM-based Discord bot framework. Plugins run as isolated WebAssembly components
 ## Quick Start
 
 ```bash
-git clone <repo-url>
-cd ynsrvcs-bot
+git clone https://github.com/yunuservices/wasmcord
+cd wasmcord
 
 cp .env.example .env
 # Edit .env and set DISCORD_TOKEN='Bot YOUR_TOKEN'
