@@ -90,7 +90,7 @@ fn default_max_memories() -> usize {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct PluginConfig {
-    #[serde(flatten)]
+    #[serde(default)]
     pub permissions: PluginPermissions,
     #[serde(default)]
     pub limits: PluginLimits,
@@ -126,7 +126,7 @@ pub(crate) struct PluginManifest {
     pub dependencies: HashMap<String, DependencySpec>,
     #[serde(default)]
     pub provides: Vec<String>,
-    #[serde(flatten)]
+    #[serde(default)]
     pub permissions: PluginPermissions,
     #[serde(default)]
     pub limits: PluginLimits,
@@ -1960,6 +1960,40 @@ impl PluginManager {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn manifest_reads_the_permissions_section() {
+        let manifest: PluginManifest = toml::from_str(
+            r#"
+[plugin]
+name = "sample"
+abi_version = 2
+
+[permissions]
+http = true
+http_allowed_hosts = ["api.example.com"]
+env = ["SAMPLE_KEY"]
+kv = true
+"#,
+        )
+        .unwrap();
+
+        assert!(manifest.permissions.http);
+        assert_eq!(manifest.permissions.http_allowed_hosts, ["api.example.com"]);
+        assert_eq!(manifest.permissions.env, ["SAMPLE_KEY"]);
+        assert!(manifest.permissions.kv);
+        assert!(!manifest.permissions.fs_read);
+    }
+
+    #[test]
+    fn manifest_without_permissions_grants_nothing() {
+        let manifest: PluginManifest = toml::from_str("[plugin]\nname = \"sample\"\n").unwrap();
+
+        assert!(!manifest.permissions.http);
+        assert!(!manifest.permissions.kv);
+        assert!(manifest.permissions.env.is_empty());
+        assert!(manifest.permissions.http_allowed_hosts.is_empty());
+    }
 
     #[test]
     fn private_and_metadata_addresses_are_not_public() {
