@@ -185,8 +185,12 @@ impl wasmtime::ResourceLimiter for PluginResourceLimiter {
     }
 }
 
-const PLUGIN_CALL_TIMEOUT: Duration = Duration::from_secs(5);
-const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const PLUGIN_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+const _: () = assert!(
+    HTTP_TIMEOUT.as_secs() < PLUGIN_CALL_TIMEOUT.as_secs(),
+    "a host http call must be able to time out inside the plugin call budget"
+);
 const PLUGIN_FUEL: u64 = 50_000_000;
 const FUEL_ASYNC_YIELD_INTERVAL: u64 = 10_000;
 const PLUGIN_HOSTCALL_FUEL: usize = 1_000_000;
