@@ -53,10 +53,12 @@ RUST_LOG=info
 [plugin]
 name = "hello"
 version = "0.1.0"
-abi_version = 1
+abi_version = 2
 
 [permissions]
 http = true
+http_allowed_hosts = ["api.example.com"]
+env = ["HELLO_API_KEY"]
 ```
 
 ### Host Functions
@@ -68,7 +70,9 @@ http = true
 - `application-id`, `update-presence`, `request-guild-members`, `schedule-task`, `cancel-task`
 - `join-voice-channel`, `leave-voice-channel`, `play-audio-url`, `stop-audio`, `pause-audio`, `resume-audio`, `skip-audio`, `set-volume`
 - `bus-publish`, `bus-subscribe`
-- `kv-get`, `kv-set`, `fs-read`, `fs-write`, `get-env`, `log`
+- `kv-get`, `kv-set` — scoped to the calling plugin
+- `fs-read`, `fs-write` — confined to the plugin workspace
+- `get-env`, `log`
 
 ### Example
 
@@ -87,13 +91,15 @@ Copy `target/wasm32-wasip2/release/ping_plugin.wasm` into `plugins/`.
 [plugin]
 name = "music"
 version = "0.2.0"
-abi_version = 1
+abi_version = 2
 
 [dependencies]
 queue = { version = ">=0.1.0" }
 
 [permissions]
 http = true
+http_allowed_hosts = ["api.example.com"]
+env = ["MUSIC_API_KEY"]
 kv = true
 bus = true
 
@@ -103,7 +109,10 @@ max_memory_bytes = 67108864
 
 - `abi_version` — blocks old plugins when the host WIT changes
 - `dependencies` — required/optional plugin deps with semver
-- `permissions` — enabled host functions
+- `permissions` — enabled host functions. `http_allowed_hosts` and `env` are
+  allowlists: outbound requests to anything other than the Discord API must
+  name the host, and `get-env` only returns variables listed in `env`. Hosts
+  resolving to private or link-local addresses are refused.
 - `limits` — WASM resource caps
 
 ## Voice
