@@ -1024,9 +1024,10 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
             return Err("fs read is not permitted".to_string());
         }
 
-        tokio::fs::read(self.workspace.join(path))
+        let workspace = self.workspace.clone();
+        tokio::task::spawn_blocking(move || workspace_read(&workspace, &path))
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?
     }
 
     async fn fs_write(&mut self, path: String, content: Vec<u8>) -> Result<(), String> {
@@ -1034,15 +1035,10 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
             return Err("fs write is not permitted".to_string());
         }
 
-        let path = self.workspace.join(path);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| e.to_string())?;
-        }
-        tokio::fs::write(&path, &content)
+        let workspace = self.workspace.clone();
+        tokio::task::spawn_blocking(move || workspace_write(&workspace, &path, &content))
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?
     }
 
     async fn bus_subscribe(&mut self, topics: Vec<String>) -> Result<(), String> {
@@ -1121,6 +1117,27 @@ pub fn plugin_dir() -> PathBuf {
 
 fn workspace_path(name: &str) -> PathBuf {
     plugin_dir().join(name).join("workspace")
+}
+
+fn open_workspace(workspace: &Path) -> Result<cap_std::fs::Dir, String> {
+    cap_std::fs::Dir::open_ambient_dir(workspace, cap_std::ambient_authority())
+        .map_err(|e| format!("failed to open plugin workspace: {e}"))
+}
+
+fn workspace_read(workspace: &Path, path: &str) -> Result<Vec<u8>, String> {
+    open_workspace(workspace)?
+        .read(path)
+        .map_err(|e| e.to_string())
+}
+
+fn workspace_write(workspace: &Path, path: &str, content: &[u8]) -> Result<(), String> {
+    let dir = open_workspace(workspace)?;
+    if let Some(parent) = Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        dir.create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    dir.write(path, content).map_err(|e| e.to_string())
 }
 
 async fn load_manifest(wasm_path: &Path) -> PluginManifest {
@@ -1863,6 +1880,33 @@ impl PluginManager {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn workspace_rejects_absolute_path() {
+        let dir = std::env::temp_dir().join("ynsrvcs-ws-abs");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(workspace_read(&dir, "/etc/passwd").is_err());
+        assert!(workspace_write(&dir, "/tmp/ynsrvcs-escape", b"x").is_err());
+        assert!(!Path::new("/tmp/ynsrvcs-escape").exists());
+    }
+
+    #[test]
+    fn workspace_rejects_parent_traversal() {
+        let dir = std::env::temp_dir().join("ynsrvcs-ws-traversal");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(workspace_read(&dir, "../../../../etc/passwd").is_err());
+        assert!(workspace_write(&dir, "../ynsrvcs-escape", b"x").is_err());
+        assert!(!dir.parent().unwrap().join("ynsrvcs-escape").exists());
+    }
+
+    #[test]
+    fn workspace_allows_contained_paths() {
+        let dir = std::env::temp_dir().join("ynsrvcs-ws-ok");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        workspace_write(&dir, "nested/state.json", b"{}").unwrap();
+        assert_eq!(workspace_read(&dir, "nested/state.json").unwrap(), b"{}");
+    }
     use super::*;
 
     fn ensure_ping_wasm() -> Result<std::path::PathBuf> {
