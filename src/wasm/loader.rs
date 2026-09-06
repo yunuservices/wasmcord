@@ -187,7 +187,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const PLUGIN_FUEL: u64 = 50_000_000;
 const FUEL_ASYNC_YIELD_INTERVAL: u64 = 10_000;
 const PLUGIN_HOSTCALL_FUEL: usize = 1_000_000;
-const PLUGIN_ABI_VERSION: u64 = 1;
+const PLUGIN_ABI_VERSION: u64 = 2;
 const DISCORD_RATE_LIMIT_MAX_CONCURRENT: usize = 5;
 const DISCORD_REQUEST_MAX_RETRIES: u32 = 3;
 
@@ -995,27 +995,27 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
         }
     }
 
-    async fn kv_get(&mut self, scope: String, key: String) -> Option<Vec<u8>> {
+    async fn kv_get(&mut self, key: String) -> Option<Vec<u8>> {
         if !self.config.permissions.kv {
             return None;
         }
 
-        match self.kv.get(&scope, &key).await {
+        match self.kv.get(&self.plugin_name, &key).await {
             Ok(v) => v,
             Err(e) => {
-                tracing::error!("kv_get failed for {scope}/{key}: {e}");
+                tracing::error!("kv_get failed for {}/{key}: {e}", self.plugin_name);
                 None
             }
         }
     }
 
-    async fn kv_set(&mut self, scope: String, key: String, value: Vec<u8>) {
+    async fn kv_set(&mut self, key: String, value: Vec<u8>) {
         if !self.config.permissions.kv {
             return;
         }
 
-        if let Err(e) = self.kv.set(scope, key, value).await {
-            tracing::error!("kv_set failed: {e}");
+        if let Err(e) = self.kv.set(self.plugin_name.clone(), key, value).await {
+            tracing::error!("kv_set failed for {}: {e}", self.plugin_name);
         }
     }
 
@@ -1880,6 +1880,21 @@ impl PluginManager {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn kv_scopes_are_isolated_per_plugin() -> Result<()> {
+        let dir = std::env::temp_dir().join("ynsrvcs-kv-isolation");
+        let _ = std::fs::remove_dir_all(&dir);
+        let kv = KvStore::with_path(&dir)?;
+
+        kv.set("alpha".to_string(), "token".to_string(), b"secret".to_vec())
+            .await?;
+
+        assert_eq!(kv.get("alpha", "token").await?, Some(b"secret".to_vec()));
+        assert_eq!(kv.get("beta", "token").await?, None);
+
+        Ok(())
+    }
 
     #[test]
     fn workspace_rejects_absolute_path() {

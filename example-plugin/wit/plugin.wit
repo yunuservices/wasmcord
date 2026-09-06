@@ -37,8 +37,8 @@ interface host {
     now-ms: func() -> u64;
     log: func(level: string, message: string);
 
-    kv-get: func(scope: string, key: string) -> option<list<u8>>;
-    kv-set: func(scope: string, key: string, value: list<u8>);
+    kv-get: func(key: string) -> option<list<u8>>;
+    kv-set: func(key: string, value: list<u8>);
 
     fs-read: func(path: string) -> result<list<u8>, string>;
     fs-write: func(path: string, content: list<u8>) -> result<_, string>;
