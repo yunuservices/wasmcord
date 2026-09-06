@@ -28,7 +28,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use super::kv::KvStore;
 use super::plugin;
 
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct PluginPermissions {
     #[serde(default)]
     pub http: bool,
@@ -37,7 +37,7 @@ pub struct PluginPermissions {
     #[serde(default)]
     pub fs_write: bool,
     #[serde(default)]
-    pub env: bool,
+    pub env: Vec<String>,
     #[serde(default)]
     pub kv: bool,
     #[serde(default)]
@@ -85,7 +85,7 @@ fn default_max_memories() -> usize {
     1
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct PluginConfig {
     #[serde(flatten)]
     pub permissions: PluginPermissions,
@@ -701,7 +701,7 @@ impl plugin::ynsrvcs::plugins::host::Host for HostContext {
     }
 
     async fn get_env(&mut self, name: String) -> Option<String> {
-        if !self.config.permissions.env {
+        if !self.config.permissions.env.iter().any(|k| k == &name) {
             return None;
         }
 
@@ -1450,7 +1450,7 @@ impl PluginManager {
         let component = Component::new(engine, &bytes)?;
         let workspace = workspace_path(&name);
         let config = PluginConfig {
-            permissions: manifest.permissions,
+            permissions: manifest.permissions.clone(),
             limits: manifest.limits,
         };
         tokio::fs::create_dir_all(&workspace).await?;
@@ -1472,7 +1472,7 @@ impl PluginManager {
                 name.clone(),
                 kv.clone(),
                 workspace.clone(),
-                config,
+                config.clone(),
             ),
         );
         configure_store(&mut store)?;
@@ -1574,7 +1574,7 @@ impl PluginManager {
             let plugins = self.plugins.lock().await;
             plugins
                 .get(name)
-                .map(|loaded| (Arc::clone(&loaded.component), loaded.config))
+                .map(|loaded| (Arc::clone(&loaded.component), loaded.config.clone()))
         };
 
         if let Some((component, config)) = maybe_loaded {
@@ -1679,7 +1679,13 @@ impl PluginManager {
             let guard = self.plugins.lock().await;
             guard
                 .iter()
-                .map(|(name, loaded)| (name.clone(), Arc::clone(&loaded.component), loaded.config))
+                .map(|(name, loaded)| {
+                    (
+                        name.clone(),
+                        Arc::clone(&loaded.component),
+                        loaded.config.clone(),
+                    )
+                })
                 .collect::<Vec<_>>()
         };
 
@@ -1810,7 +1816,7 @@ impl PluginManager {
                         name.clone(),
                         messages,
                         Arc::clone(&loaded.component),
-                        loaded.config,
+                        loaded.config.clone(),
                     ))
                 })
                 .collect()
