@@ -84,3 +84,23 @@ pub fn kv_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("./data"))
         .join("plugin-kv")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn kv_scopes_are_isolated_per_plugin() -> Result<()> {
+        let dir = std::env::temp_dir().join("ynsrvcs-kv-isolation");
+        let _ = std::fs::remove_dir_all(&dir);
+        let kv = KvStore::with_path(&dir)?;
+
+        kv.set("alpha".to_string(), "token".to_string(), b"secret".to_vec())
+            .await?;
+
+        assert_eq!(kv.get("alpha", "token").await?, Some(b"secret".to_vec()));
+        assert_eq!(kv.get("beta", "token").await?, None);
+
+        Ok(())
+    }
+}

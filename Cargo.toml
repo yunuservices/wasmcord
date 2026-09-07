@@ -17,6 +17,7 @@ serde_json = "1.0"
 wasmtime = { version = "46", features = ["component-model", "async"] }
 wasmtime-wasi = "46"
 notify = "8"
+cap-std = "3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
 songbird = { version = "0.6", default-features = false, features = ["twilight", "gateway", "driver", "rustls", "tws", "builtin-queue"] }
 semver = "1"
